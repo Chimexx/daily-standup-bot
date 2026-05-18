@@ -71,7 +71,6 @@ const REPO_PATHS = [
   "/Users/macbook/Repos/Timart/timart-unify",
   "/Users/macbook/Repos/Timart/timart-landing-page",
   "/Users/macbook/Repos/Timart/partner-landing-page",
-
 ];
 
 /** Your git author name/email pattern to match commits */
