@@ -247,6 +247,7 @@ YOUR TASK:
 4. Keep it concise and professional
 5. Focus on completed work, not technical implementation details
 6. Use clear, business-friendly language
+7. When several commits are small, vague, or intangible (typos, tweaks, cleanup, minor fixes), merge them into **themed bullets** instead of one bullet per commit
 
 OUTPUT FORMAT:
 Return ONLY the standup message content, formatted as:
@@ -260,13 +261,22 @@ Date: [Date range if multiple days, or single date]
 [Another Repository]:
 • [Summary of work]
 
+GROUPING INTANGIBLE OR MINOR WORK:
+Use short umbrella bullets when messages are thin (e.g. "wip", "fixes", "small tweaks", "copy", "styles") or too numerous to list individually. Prefer labels like:
+• Bug fixes — group defect fixes, regressions, edge cases, error handling, and stability tweaks under one line (e.g. "Addressed several minor bugs and edge cases across [area].").
+• UI / UX updates — group layout, styling, spacing, components, responsiveness, and visual polish under one line (e.g. "Refined UI/UX on [screen or flow].").
+• Copy / content — group text, labels, translations, and messaging tweaks.
+• Maintenance — group refactors, deps, config, lint/formatting, and housekeeping only when there is no clearer product outcome.
+
+You may use only the umbrellas that fit the commits; omit empty categories. Prefer one strong umbrella bullet over many vague single-commit bullets.
+
 GUIDELINES:
 - Convert technical commit messages into plain English accomplishments
 - Merge multiple related commits into single bullet points
-- If commits span multiple days, group by day within each repository
+- If commits span multiple days, group by day within each repository (umbrella bullets may repeat per day only when needed)
 - Remove commit hashes, file names, and technical jargon
-- If commits are bug fixes, phrase as "Fixed issue with..." or "Resolved..."
-- If commits are features, phrase as "Implemented..." or "Added..."
+- If commits are substantive bug fixes, you may still phrase as "Fixed issue with..." or "Resolved..."; merge tiny fixes into a Bug fixes umbrella line
+- If commits are substantive features, phrase as "Implemented..." or "Added..."; merge cosmetic-only work into a UI / UX updates umbrella line
 - Keep each bullet to one line when possible
 - Maintain a professional but friendly tone
 - If multiple days are included, clearly label which day each item belongs to`;
