@@ -80,6 +80,13 @@ const GIT_AUTHOR_PATTERN = process.env.GIT_AUTHOR || ""; // e.g., "john.doe@comp
 /** Model to use for summarization */
 const GEMINI_MODEL = "gemini-2.5-flash";
 
+/** Oldest calendar day to scan when catching up (avoids huge git logs if .last-run is very old) */
+const MAX_CATCHUP_CALENDAR_DAYS = 14;
+
+/** Retries for outbound API calls (Wi‑Fi reconnecting after wake, transient errors) */
+const API_RETRY_ATTEMPTS = 3;
+const API_RETRY_DELAY_MS = 1500;
+
 /** File to track last successful run date */
 const LAST_RUN_FILE = join(__dirname, ".last-run");
 
@@ -124,25 +131,43 @@ function isWeekend(date) {
   return day === 0 || day === 6;
 }
 
+function startOfLocalDay(date) {
+  const d = new Date(date);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
+}
+
+function addCalendarDays(date, days) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
- * Get an array of working days (Mon-Fri) between two dates (inclusive of end, exclusive of start)
- * @param {Date} startDate
- * @param {Date} endDate
- * @returns {Array<Date>} Array of working day dates
+ * @template T
+ * @param {() => Promise<T>} operation
+ * @param {string} label
+ * @returns {Promise<T>}
  */
-function getMissedWorkingDays(startDate, endDate) {
-  const missedDays = [];
-  const current = new Date(startDate);
-  current.setDate(current.getDate() + 1); // Start from the day after startDate
-
-  while (current < endDate) {
-    if (!isWeekend(current)) {
-      missedDays.push(new Date(current));
+async function withRetries(operation, label) {
+  let lastError;
+  for (let attempt = 1; attempt <= API_RETRY_ATTEMPTS; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt < API_RETRY_ATTEMPTS) {
+        console.warn(
+          `⚠️  ${label} failed (attempt ${attempt}/${API_RETRY_ATTEMPTS}): ${error.message}. Retrying…`,
+        );
+        await sleep(API_RETRY_DELAY_MS * attempt);
+      }
     }
-    current.setDate(current.getDate() + 1);
   }
-
-  return missedDays;
+  throw lastError;
 }
 
 /**
@@ -156,6 +181,52 @@ function formatDateDisplay(date) {
     month: "short",
     day: "numeric",
   });
+}
+
+/**
+ * Local timestamp string for git --since / --until (matches prior calendar-range behavior).
+ */
+function formatLocalGitTimestamp(d) {
+  const pad = (n) => n.toString().padStart(2, "0");
+  const x = new Date(d);
+  return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())} ${pad(x.getHours())}:${pad(x.getMinutes())}:${pad(x.getSeconds())}`;
+}
+
+/**
+ * Lower bound for git log: last successful post instant, or local midnight today on first run.
+ * Caps how far back we scan when .last-run is very old.
+ */
+function computeSinceBoundary(lastRunDate, now = new Date()) {
+  const todayStart = startOfLocalDay(now);
+  const oldestAllowed = addCalendarDays(todayStart, -MAX_CATCHUP_CALENDAR_DAYS);
+
+  if (!lastRunDate) {
+    return todayStart;
+  }
+
+  const last = new Date(lastRunDate);
+  if (last < oldestAllowed) {
+    console.warn(
+      `⚠️  Last post was over ${MAX_CATCHUP_CALENDAR_DAYS} days ago; scanning commits only back to ${formatDateDisplay(oldestAllowed)}.`,
+    );
+    return oldestAllowed;
+  }
+
+  return last;
+}
+
+/**
+ * Distinct commit calendar dates (YYYY-MM-DD), sorted, as short UI labels.
+ */
+function deriveDateLabels(commits) {
+  const keys = [...new Set(commits.map((c) => c.date))].sort();
+  return keys.map((ymd) =>
+    new Date(`${ymd}T12:00:00`).toLocaleDateString("en-US", {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+    }),
+  );
 }
 
 // ============================================================================
@@ -205,92 +276,61 @@ GUIDELINES:
 // ============================================================================
 
 /**
- * Get a date range for a specific day
- * @param {Date} date - The date to get range for (defaults to today)
- * @param {boolean} includeUntilNow - If true, use current time as 'until'; if false, use end of day
- * @returns {{since: string, until: string, dateStr: string}} Date range and date string
+ * Commits with committer date strictly after the last successful Zoho post through now.
+ * Uses %cs so same-calendar-day commits made after posting appear on the next run.
+ * @param {string} repoPath
+ * @param {Date} sinceDate exclusive lower bound in local time (matches git log --since)
+ * @param {Date} untilDate upper bound (now)
+ * @returns {Array<{repo: string, message: string, date: string}>}
  */
-function getDateRange(date = new Date(), includeUntilNow = false) {
-  const targetDate = new Date(date);
-  const midnight = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 0, 0, 0);
-  const endOfDay = includeUntilNow
-    ? new Date() // Use current time for today
-    : new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 23, 59, 59);
-
-  // Format: YYYY-MM-DD HH:MM:SS
-  const formatDate = (d) => {
-    const pad = (n) => n.toString().padStart(2, "0");
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  };
-
-  // Format: YYYY-MM-DD for display
-  const formatDateStr = (d) => {
-    const pad = (n) => n.toString().padStart(2, "0");
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-  };
-
-  return {
-    since: formatDate(midnight),
-    until: formatDate(endOfDay),
-    dateStr: formatDateStr(targetDate),
-  };
-}
-
-/**
- * Extract commits from a single repository for a specific date
- * @param {string} repoPath - Absolute path to git repository
- * @param {Date} date - The date to extract commits for
- * @param {boolean} isToday - Whether this is today's date (affects time range)
- * @returns {Array<{repo: string, message: string, date: string}>} Array of commit objects
- */
-function extractCommitsFromRepo(repoPath, date = new Date(), isToday = false) {
+function extractCommitsSince(repoPath, sinceDate, untilDate = new Date()) {
   const repoName = basename(repoPath);
 
   try {
-    const { since, until, dateStr } = getDateRange(date, isToday);
-
-    // Build git log command
-    // --since and --until for date range
-    // --author to filter by author (if configured)
-    // --no-merges to exclude merge commits
-    // --pretty=format:"%s" to get only the subject line
-    let command = `git -C "${repoPath}" log --since="${since}" --until="${until}" --no-merges --pretty=format:"%s"`;
+    const sinceStr = formatLocalGitTimestamp(sinceDate);
+    const untilStr = formatLocalGitTimestamp(untilDate);
+    let command = `git -C "${repoPath}" log --since="${sinceStr}" --until="${untilStr}" --no-merges --pretty=format:"%cs%x09%s"`;
 
     if (GIT_AUTHOR_PATTERN) {
       command += ` --author="${GIT_AUTHOR_PATTERN}"`;
     }
 
-    // Execute git command
     const output = execSync(command, {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
-      timeout: 10000, // 10 second timeout
+      timeout: 10000,
     }).trim();
 
     if (!output) {
       return [];
     }
 
-    // Parse commit messages
-    const commits = output
-      .split("\n")
-      .filter((line) => line.trim().length > 0)
-      .map((message) => ({
+    const commits = [];
+    for (const line of output.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+      const tab = trimmed.indexOf("\t");
+      if (tab === -1) {
+        continue;
+      }
+      const dateStr = trimmed.slice(0, tab).trim();
+      const message = trimmed.slice(tab + 1).trim();
+      if (!message) {
+        continue;
+      }
+      commits.push({
         repo: repoName,
-        message: message.trim(),
+        message,
         date: dateStr,
-      }));
+      });
+    }
 
     return commits;
   } catch (error) {
-    // If git command fails (e.g., not a git repo, no commits), return empty
     if (error.status === 128 || error.message.includes("not a git repository")) {
       console.warn(`⚠️  ${repoName}: Not a valid git repository or no commits found`);
-    } else if (error.message.includes("No commits")) {
-      // Only show "no commits" message for today
-      if (isToday) {
-        console.log(`ℹ️  ${repoName}: No commits today`);
-      }
     } else {
       console.warn(`⚠️  ${repoName}: ${error.message}`);
     }
@@ -299,61 +339,28 @@ function extractCommitsFromRepo(repoPath, date = new Date(), isToday = false) {
 }
 
 /**
- * Aggregate commits from all configured repositories for a specific date
- * @param {Date} date - The date to aggregate commits for
- * @param {boolean} isToday - Whether this is today's date
- * @returns {Array<{repo: string, message: string, date: string}>} All commits from all repos
+ * Collect commits after last post from every repo and sort for stable prompts.
+ * @param {Date} sinceBoundary
+ * @param {Date} untilDate
  */
-function aggregateCommitsForDate(date, isToday = false) {
-  const dateLabel = isToday ? "today" : formatDateDisplay(date);
-  if (isToday) {
-    console.log("🔍 Scanning repositories for today's commits...\n");
-  } else {
-    console.log(`🔍 Scanning for commits on ${dateLabel}...\n`);
-  }
+function aggregateCommitsSince(sinceBoundary, untilDate = new Date()) {
+  const label = formatDateDisplay(sinceBoundary);
+  console.log(`🔍 Scanning commits after ${label} (exclusive) through now…\n`);
 
   const allCommits = [];
 
   for (const repoPath of REPO_PATHS) {
-    const commits = extractCommitsFromRepo(repoPath, date, isToday);
+    const commits = extractCommitsSince(repoPath, sinceBoundary, untilDate);
     allCommits.push(...commits);
 
     if (commits.length > 0) {
-      console.log(`✅ ${basename(repoPath)}: Found ${commits.length} commit(s) on ${dateLabel}`);
+      console.log(`✅ ${basename(repoPath)}: Found ${commits.length} commit(s)`);
     }
   }
+
+  allCommits.sort((a, b) => a.date.localeCompare(b.date) || a.repo.localeCompare(b.repo) || a.message.localeCompare(b.message));
 
   return allCommits;
-}
-
-/**
- * Aggregate commits from multiple dates (for catching up on missed days)
- * @param {Array<Date>} dates - Array of dates to aggregate commits for
- * @returns {{commits: Array, dateLabels: Array}} All commits and their date labels
- */
-function aggregateCommitsForDates(dates) {
-  const allCommits = [];
-  const datesWithCommits = [];
-
-  for (let i = 0; i < dates.length; i++) {
-    const date = dates[i];
-    const isToday = i === dates.length - 1; // Last date is today
-    const commits = aggregateCommitsForDate(date, isToday);
-
-    if (commits.length > 0) {
-      allCommits.push(...commits);
-      datesWithCommits.push(formatDateDisplay(date));
-    }
-
-    if (!isToday) {
-      console.log(""); // Add spacing between dates
-    }
-  }
-
-  return {
-    commits: allCommits,
-    dateLabels: datesWithCommits,
-  };
 }
 
 // ============================================================================
@@ -379,22 +386,26 @@ async function summarizeCommits(commits, dateLabels) {
   const isMultiDay = dateLabels.length > 1;
   const dateDescription = isMultiDay
     ? `from the following days: ${dateLabels.join(", ")}`
-    : "from today";
+    : `from ${dateLabels[0] ?? "the latest session"}`;
 
   const userPrompt = `Here are my git commits ${dateDescription}:\n\n${commitsText}\n\nPlease generate my daily standup update. ${isMultiDay ? "Since this spans multiple days, please clearly indicate which work was done on each day." : ""}`;
 
   console.log(`\n🤖 Sending to Gemini AI for summarization${isMultiDay ? " (multi-day)" : ""}...`);
 
   try {
-    const response = await genAI.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-      config: {
-        systemInstruction: SYSTEM_PROMPT,
-        temperature: 0.3, // Lower temperature for more consistent output
-        maxOutputTokens: 1500, // Increased for multi-day updates
-      },
-    });
+    const response = await withRetries(
+      () =>
+        genAI.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+          config: {
+            systemInstruction: SYSTEM_PROMPT,
+            temperature: 0.3, // Lower temperature for more consistent output
+            maxOutputTokens: 1500, // Increased for multi-day updates
+          },
+        }),
+      "Gemini API",
+    );
 
     const summary = response.text?.trim();
 
@@ -429,18 +440,21 @@ async function postToZohoCliq(message) {
   };
 
   try {
-    const response = await fetch(ZOHO_WEBHOOK_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
+    await withRetries(async () => {
+      const response = await fetch(ZOHO_WEBHOOK_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`HTTP ${response.status}: ${errorText}`);
-    }
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
+      }
+      return response;
+    }, "Zoho Cliq webhook");
 
     console.log("✅ Successfully posted to Zoho Cliq!");
     return true;
@@ -478,39 +492,28 @@ async function main() {
 
   // Check for missed days
   const lastRunDate = getLastRunDate();
-  const datesToProcess = [today];
-  let missedDaysCount = 0;
+  const now = new Date();
+  const sinceBoundary = computeSinceBoundary(lastRunDate, now);
 
   if (lastRunDate) {
-    const missedDays = getMissedWorkingDays(lastRunDate, today);
-    if (missedDays.length > 0) {
-      console.log(`📅 Last run: ${formatDateDisplay(lastRunDate)}`);
-      console.log(`📝 Catching up on ${missedDays.length} missed working day(s):`);
-      missedDays.forEach((day) => {
-        console.log(`   - ${formatDateDisplay(day)}`);
-        datesToProcess.unshift(day); // Add to beginning (chronological order)
-      });
-      missedDaysCount = missedDays.length;
-      console.log("");
-    }
+    console.log(`📅 Last successful post: ${lastRunDate.toLocaleString()}`);
+    console.log(`📌 Gathering commits after that time (same-day commits you push later are included next run).\n`);
   } else {
-    console.log("📅 First run detected. No missed days to catch up.\n");
+    console.log("📅 First run: gathering commits since local midnight today.\n");
   }
 
-  // Step 1: Aggregate commits from all dates
-  const { commits, dateLabels } = aggregateCommitsForDates(datesToProcess);
+  const commits = aggregateCommitsSince(sinceBoundary, now);
+  const dateLabels = deriveDateLabels(commits);
 
   if (commits.length === 0) {
-    console.log("\n📝 No commits found across all repositories.");
+    console.log("\n📝 No new commits since the last post.");
     console.log("   No standup update will be posted.");
-    // Still save last run date to avoid re-scanning these days
-    saveLastRunDate();
+    console.log("   (.last-run is unchanged.)");
     process.exit(0);
   }
 
-  const dateRangeText = dateLabels.length > 1
-    ? `${dateLabels[0]} to ${dateLabels[dateLabels.length - 1]}`
-    : dateLabels[0];
+  const dateRangeText =
+    dateLabels.length > 1 ? `${dateLabels[0]} → ${dateLabels[dateLabels.length - 1]}` : dateLabels[0];
   console.log(`\n📊 Total commits found (${dateRangeText}): ${commits.length}`);
 
   // Step 2: Summarize with AI
@@ -534,9 +537,6 @@ async function main() {
   try {
     await postToZohoCliq(summary);
     console.log("\n🎉 Standup update completed successfully!");
-    if (missedDaysCount > 0) {
-      console.log(`   (Included ${missedDaysCount} missed day(s) in this update)`);
-    }
     // Save successful run date
     saveLastRunDate();
   } catch (error) {
