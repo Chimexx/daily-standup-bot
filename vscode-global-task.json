@@ -1,0 +1,62 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Generate Daily Standup",
+      "type": "shell",
+      "command": "node",
+      "args": [
+        "${userHome}/personal-automation/daily-standup-bot/index.js"
+      ],
+      "options": {
+        "env": {
+          "GEMINI_API_KEY": "${input:geminiApiKey}",
+          "ZOHO_WEBHOOK_URL": "${input:zohoWebhookUrl}"
+        }
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "shared",
+        "showReuseMessage": true,
+        "clear": false
+      },
+      "problemMatcher": [],
+      "detail": "Generate and post daily standup update from git commits"
+    },
+    {
+      "label": "Generate Standup (Quick - Hardcoded Creds)",
+      "type": "shell",
+      "command": "node ${userHome}/personal-automation/daily-standup-bot/index.js",
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "shared"
+      },
+      "problemMatcher": [],
+      "detail": "Quick run with hardcoded credentials in the script"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "geminiApiKey",
+      "type": "promptString",
+      "description": "Enter your Gemini API Key (or press Enter to use hardcoded value)",
+      "default": "",
+      "password": true
+    },
+    {
+      "id": "zohoWebhookUrl",
+      "type": "promptString",
+      "description": "Enter your Zoho Webhook URL (or press Enter to use hardcoded value)",
+      "default": ""
+    }
+  ]
+}
