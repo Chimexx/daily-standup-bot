@@ -79,6 +79,9 @@ const GIT_AUTHOR_PATTERN = process.env.GIT_AUTHOR || ""; // e.g., "john.doe@comp
 /** Model to use for summarization */
 const GEMINI_MODEL = "gemini-2.5-flash";
 
+/** Max words per standup bullet (AI prompt + manual fallback) */
+const MAX_STANDUP_BULLET_WORDS = 30;
+
 /** Oldest calendar day to scan when catching up (avoids huge git logs if .last-run is very old) */
 const MAX_CATCHUP_CALENDAR_DAYS = 14;
 
@@ -240,25 +243,33 @@ You will receive a list of git commits in this format:
 [another-repo] [YYYY-MM-DD] another commit message
 
 YOUR TASK:
-1. Group commits by repository name AND date
+1. Group commits by repository name (use commit dates only to order and merge internally — do not echo weekdays on each bullet)
 2. Summarize related commits into coherent bullet points
 3. Write in first person ("I") as if the developer is speaking
 4. Keep it concise and professional
 5. Focus on completed work, not technical implementation details
 6. Use clear, business-friendly language
-7. When several commits are small, vague, or intangible (typos, tweaks, cleanup, minor fixes), merge them into **themed bullets** instead of one bullet per commit
+7. When several commits are small, vague, or intangible (typos, tweaks, cleanup, minor fixes), merge them into themed bullets instead of one bullet per commit
 
 OUTPUT FORMAT:
 Return ONLY the standup message content, formatted as:
-📅 Daily Standup Update
+📅 Daily Update
 Date: [Date range if multiple days, or single date]
 
 [Repository Name]:
-• [Date if multi-day] Completed [summary of work done]
+• Completed [summary of work done]
 • [Additional bullet if needed]
 
 [Another Repository]:
 • [Summary of work]
+
+DATE LINES VS BULLETS:
+The required standup header includes Date: [single date or range]. Do not prefix bullets with weekdays (Mon, Tue, …) or repeat calendar dates on every bullet — the header already provides timing context.
+If commits span several calendar days and separating days avoids confusion, under that repository only insert plain (non-bullet) subsection headings before grouped bullets, such as "June 9, 2026" or "2026-06-09" — never weekday abbreviations on bullets themselves.
+
+DEPLOYMENT / VERSION BUMPS:
+Treat commits as a production or build deployment when they clearly bump app/package version, especially when package.json (or similar manifest) is mentioned. Examples: "update version to 26.5.18 in package.json", "bump version to 1.2.3", "chore: release 2.0.0".
+For those commits, add an explicit bullet such as: "Shipped / deployed build [version] for [repository name]." or "Released version [version] from [repository]." Merge duplicate version-only housekeeping into one deployment line when appropriate.
 
 GROUPING INTANGIBLE OR MINOR WORK:
 Use short umbrella bullets when messages are thin (e.g. "wip", "fixes", "small tweaks", "copy", "styles") or too numerous to list individually. Prefer labels like:
@@ -269,16 +280,19 @@ Use short umbrella bullets when messages are thin (e.g. "wip", "fixes", "small t
 
 You may use only the umbrellas that fit the commits; omit empty categories. Prefer one strong umbrella bullet over many vague single-commit bullets.
 
+LENGTH (STRICT):
+- Each bullet point is one list line starting with • (or equivalent). Maximum ${MAX_STANDUP_BULLET_WORDS} words in the text of that bullet only — count words in that single line after the marker; title/header lines and repository names are not bullets and are unrestricted.
+- Split overflow into a second bullet if needed rather than exceeding the word limit per bullet.
+
 GUIDELINES:
 - Convert technical commit messages into plain English accomplishments
 - Merge multiple related commits into single bullet points
-- If commits span multiple days, group by day within each repository (umbrella bullets may repeat per day only when needed)
-- Remove commit hashes, file names, and technical jargon
+- If commits span multiple days, keep chronological order; optional dated subsection headings (plain lines, full calendar dates only when necessary)—never prefix individual bullets with weekdays or repeated dates
+- Remove commit hashes, file names, and technical jargon (except version numbers for deployment bullets)
 - If commits are substantive bug fixes, you may still phrase as "Fixed issue with..." or "Resolved..."; merge tiny fixes into a Bug fixes umbrella line
 - If commits are substantive features, phrase as "Implemented..." or "Added..."; merge cosmetic-only work into a UI / UX updates umbrella line
-- Keep each bullet to one line when possible
-- Maintain a professional but friendly tone
-- If multiple days are included, clearly label which day each item belongs to`;
+- Each bullet point stays on one line and must respect the ${MAX_STANDUP_BULLET_WORDS}-word maximum for that bullet only
+- Maintain a professional but friendly tone`;
 
 // ============================================================================
 // GIT COMMIT EXTRACTION
@@ -397,7 +411,7 @@ async function summarizeCommits(commits, dateLabels) {
     ? `from the following days: ${dateLabels.join(", ")}`
     : `from ${dateLabels[0] ?? "the latest session"}`;
 
-  const userPrompt = `Here are my git commits ${dateDescription}:\n\n${commitsText}\n\nPlease generate my daily standup update. ${isMultiDay ? "Since this spans multiple days, please clearly indicate which work was done on each day." : ""}`;
+  const userPrompt = `Here are my git commits ${dateDescription}:\n\n${commitsText}\n\nPlease generate my daily standup update. ${isMultiDay ? "Commits span multiple calendar days: keep chronological order; you may use plain subsection headings with full dates under a repo if helpful—do not prefix bullets with weekdays like Mon/Tue. " : ""}Commits that bump version in package.json (or similar) indicate a shipped build—call those out explicitly with version numbers. Each bullet point (each • line) must be at most ${MAX_STANDUP_BULLET_WORDS} words—count words only within that line after the bullet marker.`;
 
   console.log(`\n🤖 Sending to Gemini AI for summarization${isMultiDay ? " (multi-day)" : ""}...`);
 
@@ -535,6 +549,8 @@ async function main() {
     summary = formatCommitsManually(commits, dateLabels);
   }
 
+  summary = enforceMaxWordsPerBullet(summary);
+
   // Step 3: Display the summary
   console.log("\n" + "=".repeat(60));
   console.log("📋 GENERATED STANDUP UPDATE:");
@@ -553,6 +569,75 @@ async function main() {
     // Don't save last run date on failure, so we retry the same days next time
     process.exit(1);
   }
+}
+
+/**
+ * @param {string} text
+ * @param {number} [maxWords]
+ */
+function truncateWords(text, maxWords = MAX_STANDUP_BULLET_WORDS) {
+  const words = text
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length <= maxWords) {
+    return words.join(" ");
+  }
+  return `${words.slice(0, maxWords).join(" ")}…`;
+}
+
+/**
+ * Enforces {@link MAX_STANDUP_BULLET_WORDS} words max per bullet line (after •, -, *, or numbered markers).
+ */
+function enforceMaxWordsPerBullet(text, maxWords = MAX_STANDUP_BULLET_WORDS) {
+  return text
+    .split("\n")
+    .map((line) => {
+      const m = line.match(/^(\s*)(?:([•*\-])|(\d+\.))\s+(.*)$/);
+      if (!m) {
+        return line;
+      }
+      const [, indent, charMarker, numMarker, body] = m;
+      const marker = charMarker ?? numMarker;
+      return `${indent}${marker} ${truncateWords(body, maxWords)}`;
+    })
+    .join("\n");
+}
+
+/**
+ * Best-effort semver fragment from a commit subject line.
+ */
+function extractSemverFromCommitMessage(message) {
+  const m = message.match(/\bv?(\d+\.\d+\.\d+(?:[-+]?[a-zA-Z0-9.-]+)?)\b/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Heuristic: version bump / release commits (e.g. "update version to 26.5.18 in package.json").
+ */
+function looksLikePackageVersionBump(message) {
+  const lower = message.toLowerCase();
+  const mentionsManifest =
+    lower.includes("package.json") ||
+    lower.includes("package-lock.json") ||
+    lower.includes("package-lock");
+  const mentionsVersioning =
+    /(^|[\s,.])(bump|update)\s+version\b/i.test(message) ||
+    /\bversion\s+bump\b/i.test(lower) ||
+    /\b(chore:\s*)?(release|publish)\b/i.test(lower);
+  const ver = extractSemverFromCommitMessage(message);
+  return Boolean(ver) && (mentionsManifest || mentionsVersioning || /\b(deploy|release|publish)\b/i.test(lower));
+}
+
+/**
+ * One fallback bullet per commit: deployment wording when detected, else truncated raw subject.
+ */
+function manualBulletFromCommit(repoName, rawMessage) {
+  const ver = extractSemverFromCommitMessage(rawMessage);
+  if (ver && looksLikePackageVersionBump(rawMessage)) {
+    return truncateWords(`Deployed build ${ver}.`);
+  }
+  return truncateWords(rawMessage);
 }
 
 /**
@@ -605,7 +690,7 @@ function formatCommitsManually(commits, dateLabels) {
         message += `  [${displayDate}]\n`;
       }
       for (const msg of messages) {
-        message += `  • ${msg}\n`;
+        message += `  • ${manualBulletFromCommit(repo, msg)}\n`;
       }
     }
     message += "\n";
