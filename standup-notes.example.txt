@@ -1,0 +1,7 @@
+# TEMPLATE ONLY — the bot does NOT read this file.
+# Create standup-notes.txt (copy this file) and edit THAT file:
+#   cp standup-notes.example.txt standup-notes.txt
+#
+# One line per item, starting with "-". Cleared after a successful Zoho post.
+
+- Example: had a planning meeting with product

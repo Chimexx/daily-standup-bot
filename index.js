@@ -6,7 +6,8 @@
  *
  * Setup:
  * 1. Create a .env file with GEMINI_API_KEY, ZOHO_WEBHOOK_URL, and REPO_PATHS (colon-separated repo paths)
- * 2. Run: node index.js
+ * 2. Optional: standup-notes.txt — lines starting with "-" for non-git work (cleared after a successful post)
+ * 3. Run: node index.js
  */
 
 import { GoogleGenAI } from "@google/genai";
@@ -101,6 +102,16 @@ const API_RETRY_DELAY_MS = 1500;
 /** File to track last successful run date */
 const LAST_RUN_FILE = join(__dirname, ".last-run");
 
+/**
+ * Pending manual standup items (lines starting with "-"). Cleared only after a successful Zoho post.
+ * Survives missed 5:30 runs and notes added after the scheduled post the same day.
+ */
+const MANUAL_NOTES_FILE = process.env.MANUAL_NOTES_FILE
+  ? process.env.MANUAL_NOTES_FILE.startsWith("/")
+    ? process.env.MANUAL_NOTES_FILE
+    : join(__dirname, process.env.MANUAL_NOTES_FILE)
+  : join(__dirname, "standup-notes.txt");
+
 // ============================================================================
 // LAST RUN TRACKING
 // ============================================================================
@@ -130,6 +141,102 @@ function saveLastRunDate() {
   } catch (error) {
     console.warn("⚠️  Could not save last run date:", error.message);
   }
+}
+
+// ============================================================================
+// MANUAL NOTES (non-git work)
+// ============================================================================
+
+/**
+ * Read standup-notes.txt (or MANUAL_NOTES_FILE). Each line starting with "-" is one item.
+ * @returns {string[]}
+ */
+const STANDUP_NOTES_EXAMPLE_FILE = join(__dirname, "standup-notes.example.txt");
+
+/**
+ * Warn when bullets were added to the example file but not standup-notes.txt (common mistake).
+ */
+function warnIfNotesOnlyInExampleFile() {
+  if (existsSync(MANUAL_NOTES_FILE) || !existsSync(STANDUP_NOTES_EXAMPLE_FILE)) {
+    return;
+  }
+  try {
+    const exampleNotes = readFileSync(STANDUP_NOTES_EXAMPLE_FILE, "utf-8")
+      .split("\n")
+      .filter((line) => line.trim().startsWith("-") && !line.trim().startsWith("#"));
+    if (exampleNotes.length > 0) {
+      console.warn(
+        `⚠️  Found ${exampleNotes.length} bullet line(s) in standup-notes.example.txt, but the bot reads standup-notes.txt only.`,
+      );
+      console.warn(`   Copy or rename: cp standup-notes.example.txt standup-notes.txt\n`);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function loadManualNotes() {
+  if (!existsSync(MANUAL_NOTES_FILE)) {
+    return [];
+  }
+  try {
+    const lines = readFileSync(MANUAL_NOTES_FILE, "utf-8").split("\n");
+    const notes = [];
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) {
+        continue;
+      }
+      if (!line.startsWith("-")) {
+        continue;
+      }
+      const text = line.replace(/^-\s*/, "").trim();
+      if (text.length > 0) {
+        notes.push(text);
+      }
+    }
+    return notes;
+  } catch (error) {
+    console.warn(`⚠️  Could not read manual notes (${MANUAL_NOTES_FILE}):`, error.message);
+    return [];
+  }
+}
+
+/** Clear manual notes after a successful post (file kept, content emptied). */
+function clearManualNotes() {
+  try {
+    writeFileSync(MANUAL_NOTES_FILE, "", "utf-8");
+  } catch (error) {
+    console.warn(`⚠️  Could not clear manual notes (${MANUAL_NOTES_FILE}):`, error.message);
+  }
+}
+
+/**
+ * Append a guaranteed section so manual items are never dropped (used when git commits are also present).
+ * @param {string} summary
+ * @param {string[]} notes
+ */
+function appendManualNotesSection(summary, notes) {
+  if (notes.length === 0) {
+    return summary;
+  }
+  const lines = notes.map((n) => `• ${truncateWords(n)}`);
+  return `${summary.trim()}\n\nOther (not from git):\n${lines.join("\n")}`;
+}
+
+/**
+ * Standup from manual notes only (no commits in this run).
+ * @param {string[]} notes
+ */
+function formatNotesOnlyManually(notes) {
+  const date = new Date().toLocaleDateString("en-US", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+  const lines = notes.map((n) => `• ${truncateWords(n)}`);
+  return `📅 Daily Update\nDate: ${date}\n\nOther (not from git):\n${lines.join("\n")}`;
 }
 
 /**
@@ -301,7 +408,8 @@ GUIDELINES:
 - If commits are substantive bug fixes, you may still phrase as "Fixed issue with..." or "Resolved..."; merge tiny fixes into a Bug fixes umbrella line
 - If commits are substantive features, phrase as "Implemented..." or "Added..."; merge cosmetic-only work into a UI / UX updates umbrella line
 - Each bullet point stays on one line and must respect the ${MAX_STANDUP_BULLET_WORDS}-word maximum for that bullet only
-- Maintain a professional but friendly tone`;
+- Maintain a professional but friendly tone
+- When the user message says manual items are appended separately under "Other (not from git)", summarize git commits only and do not repeat those manual items`;
 
 // ============================================================================
 // GIT COMMIT EXTRACTION
@@ -405,7 +513,7 @@ function aggregateCommitsSince(sinceBoundary, untilDate = new Date()) {
  * @param {Array<string>} dateLabels - Labels for the dates being summarized
  * @returns {Promise<string>} Summarized standup message
  */
-async function summarizeCommits(commits, dateLabels) {
+async function summarizeCommits(commits, dateLabels, manualNotes = []) {
   if (!GEMINI_API_KEY || GEMINI_API_KEY === "YOUR_GEMINI_API_KEY_HERE") {
     throw new Error("Gemini API key not configured. Please set GEMINI_API_KEY.");
   }
@@ -420,7 +528,12 @@ async function summarizeCommits(commits, dateLabels) {
     ? `from the following days: ${dateLabels.join(", ")}`
     : `from ${dateLabels[0] ?? "the latest session"}`;
 
-  const userPrompt = `Here are my git commits ${dateDescription}:\n\n${commitsText}\n\nPlease generate my daily standup update. ${isMultiDay ? "Commits span multiple calendar days: keep chronological order; you may use plain subsection headings with full dates under a repo if helpful—do not prefix bullets with weekdays like Mon/Tue. " : ""}Commits that bump version in package.json (or similar) indicate a shipped build—call those out explicitly with version numbers. Each bullet point (each • line) must be at most ${MAX_STANDUP_BULLET_WORDS} words—count words only within that line after the bullet marker.`;
+  const manualNoteHint =
+    manualNotes.length > 0
+      ? " Non-git manual items will be appended automatically under \"Other (not from git)\"—summarize commits only and do not list those items. "
+      : "";
+
+  const userPrompt = `Here are my git commits ${dateDescription}:\n\n${commitsText}\n\nPlease generate my daily standup update.${manualNoteHint}${isMultiDay ? "Commits span multiple calendar days: keep chronological order; you may use plain subsection headings with full dates under a repo if helpful—do not prefix bullets with weekdays like Mon/Tue. " : ""}Commits that bump version in package.json (or similar) indicate a shipped build—call those out explicitly with version numbers. Each bullet point (each • line) must be at most ${MAX_STANDUP_BULLET_WORDS} words—count words only within that line after the bullet marker.`;
 
   console.log(`\n🤖 Sending to Gemini AI for summarization${isMultiDay ? " (multi-day)" : ""}...`);
 
@@ -450,6 +563,43 @@ async function summarizeCommits(commits, dateLabels) {
     console.error("❌ AI summarization failed:", error.message);
     throw error;
   }
+}
+
+/**
+ * Standup when there are manual notes but no new git commits in the window.
+ * @param {string[]} notes
+ */
+async function summarizeNotesOnly(notes) {
+  if (!GEMINI_API_KEY || GEMINI_API_KEY === "YOUR_GEMINI_API_KEY_HERE") {
+    throw new Error("Gemini API key not configured. Please set GEMINI_API_KEY.");
+  }
+
+  const genAI = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+  const notesText = notes.map((n, i) => `${i + 1}. ${n}`).join("\n");
+
+  const userPrompt = `I have no new git commits to report, but here is other work I did (not in git):\n\n${notesText}\n\nGenerate my daily standup update using the standard header and an "Other (not from git)" section with one • bullet per item (you may lightly polish wording). Each bullet must be at most ${MAX_STANDUP_BULLET_WORDS} words.`;
+
+  console.log("\n🤖 Sending manual notes to Gemini AI for summarization...");
+
+  const response = await withRetries(
+    () =>
+      genAI.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+        config: {
+          systemInstruction: SYSTEM_PROMPT,
+          temperature: 0.3,
+          maxOutputTokens: 1000,
+        },
+      }),
+    "Gemini API",
+  );
+
+  const summary = response.text?.trim();
+  if (!summary) {
+    throw new Error("AI returned empty response");
+  }
+  return summary;
 }
 
 // ============================================================================
@@ -536,28 +686,55 @@ async function main() {
     console.log("📅 First run: gathering commits since local midnight today.\n");
   }
 
-  const commits = aggregateCommitsSince(sinceBoundary, now);
-  const dateLabels = deriveDateLabels(commits);
+  const manualNotes = loadManualNotes();
+  if (manualNotes.length === 0) {
+    warnIfNotesOnlyInExampleFile();
+  }
+  if (manualNotes.length > 0) {
+    console.log(`📝 Manual notes: ${manualNotes.length} item(s) in ${basename(MANUAL_NOTES_FILE)}`);
+    console.log("   (Kept until a successful post—includes notes added after a missed or early run.)\n");
+  }
 
-  if (commits.length === 0) {
-    console.log("\n📝 No new commits since the last post.");
+  const commits = aggregateCommitsSince(sinceBoundary, now);
+  let dateLabels = deriveDateLabels(commits);
+
+  if (commits.length === 0 && manualNotes.length === 0) {
+    console.log("\n📝 No new commits since the last post and no manual notes.");
     console.log("   No standup update will be posted.");
-    console.log("   (.last-run is unchanged.)");
+    console.log("   (.last-run and standup-notes are unchanged.)");
     process.exit(0);
   }
 
-  const dateRangeText =
-    dateLabels.length > 1 ? `${dateLabels[0]} → ${dateLabels[dateLabels.length - 1]}` : dateLabels[0];
-  console.log(`\n📊 Total commits found (${dateRangeText}): ${commits.length}`);
+  if (dateLabels.length === 0 && manualNotes.length > 0) {
+    dateLabels = [formatDateDisplay(now)];
+  }
+
+  if (commits.length > 0) {
+    const dateRangeText =
+      dateLabels.length > 1 ? `${dateLabels[0]} → ${dateLabels[dateLabels.length - 1]}` : dateLabels[0];
+    console.log(`\n📊 Total commits found (${dateRangeText}): ${commits.length}`);
+  } else {
+    console.log("\n📊 No new commits; posting manual notes only.");
+  }
 
   // Step 2: Summarize with AI
   let summary;
   try {
-    summary = await summarizeCommits(commits, dateLabels);
+    if (commits.length === 0) {
+      summary = await summarizeNotesOnly(manualNotes);
+    } else {
+      summary = await summarizeCommits(commits, dateLabels, manualNotes);
+    }
   } catch (error) {
-    // Fallback: format commits manually if AI fails
     console.log("\n⚠️  AI summarization failed. Using fallback formatting...");
-    summary = formatCommitsManually(commits, dateLabels);
+    summary =
+      commits.length === 0
+        ? formatNotesOnlyManually(manualNotes)
+        : formatCommitsManually(commits, dateLabels);
+  }
+
+  if (commits.length > 0 && manualNotes.length > 0) {
+    summary = appendManualNotesSection(summary, manualNotes);
   }
 
   summary = enforceMaxWordsPerBullet(summary);
@@ -573,11 +750,14 @@ async function main() {
   try {
     await postToZohoCliq(summary);
     console.log("\n🎉 Standup update completed successfully!");
-    // Save successful run date
     saveLastRunDate();
+    if (manualNotes.length > 0) {
+      clearManualNotes();
+      console.log(`   Cleared ${basename(MANUAL_NOTES_FILE)} after successful post.`);
+    }
   } catch (error) {
     console.error("\n❌ Failed to complete standup update.");
-    // Don't save last run date on failure, so we retry the same days next time
+    console.error("   .last-run and standup-notes were not changed.");
     process.exit(1);
   }
 }
