@@ -5,9 +5,8 @@
  * and posts them to Zoho Cliq via incoming webhook.
  *
  * Setup:
- * 1. Create a .env file in this directory with GEMINI_API_KEY and ZOHO_WEBHOOK_URL
- * 2. Configure your REPO_PATHS array
- * 3. Run: node index.js
+ * 1. Create a .env file with GEMINI_API_KEY, ZOHO_WEBHOOK_URL, and REPO_PATHS (colon-separated repo paths)
+ * 2. Run: node index.js
  */
 
 import { GoogleGenAI } from "@google/genai";
@@ -54,6 +53,22 @@ function loadEnvFile(filePath) {
 
 loadEnvFile(join(__dirname, ".env"));
 
+/**
+ * Parse REPO_PATHS env: colon-, semicolon-, or newline-separated absolute paths.
+ * @param {string | undefined} raw
+ * @returns {string[]}
+ */
+function parseRepoPaths(raw) {
+  if (!raw || typeof raw !== "string") {
+    return [];
+  }
+  const paths = raw
+    .split(/[:;\r\n]+/)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  return [...new Set(paths)];
+}
+
 // ============================================================================
 // CONFIGURATION - Edit these values
 // ============================================================================
@@ -64,14 +79,8 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "YOUR_GEMINI_API_KEY_HERE";
 /** Your Zoho Cliq Incoming Webhook URL (get from Zoho Cliq channel settings) */
 const ZOHO_WEBHOOK_URL = process.env.ZOHO_WEBHOOK_URL || "YOUR_ZOHO_WEBHOOK_URL_HERE";
 
-/** Array of absolute paths to your local git repositories */
-const REPO_PATHS = [
-  "/Users/macbook/Repos/Timart/mx-quick-manager-backend",
-  "/Users/macbook/Repos/Timart/timart-custom-website",
-  "/Users/macbook/Repos/Timart/timart-unify",
-  "/Users/macbook/Repos/Timart/timart-landing-page",
-  "/Users/macbook/Repos/Timart/partner-landing-page",
-];
+/** Absolute paths to local git repos — set REPO_PATHS in .env (colon-separated) */
+const REPO_PATHS = parseRepoPaths(process.env.REPO_PATHS);
 
 /** Your git author name/email pattern to match commits */
 const GIT_AUTHOR_PATTERN = process.env.GIT_AUTHOR || ""; // e.g., "john.doe@company.com" or "John Doe"
@@ -509,7 +518,9 @@ async function main() {
 
   // Validate configuration
   if (REPO_PATHS.length === 0) {
-    console.error("❌ No repositories configured. Please add paths to REPO_PATHS array.");
+    console.error(
+      "❌ No repositories configured. Set REPO_PATHS in .env (colon-separated absolute paths) or export REPO_PATHS.",
+    );
     process.exit(1);
   }
 

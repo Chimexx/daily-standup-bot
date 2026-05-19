@@ -1,78 +1,41 @@
 # Daily Standup Bot
 
-A completely free, local automation script that generates daily standup updates from your git commits and posts them to Zoho Cliq.
+Local Node.js automation that collects **new git commits** across several repositories, summarizes them with **Google Gemini**, and posts a standup-style update to **Zoho Cliq** via incoming webhook.
 
-## Overview
+## What it does
 
-This Node.js script runs entirely on your local machine and:
-1. Scans multiple git repositories for commits you authored today
-2. Uses Google's Gemini AI (free tier) to summarize commits into a professional standup update
-3. Posts the summary directly to a Zoho Cliq channel via webhook
+1. **Runs only Monday–Friday** (weekends exit immediately; nothing is posted).
+2. **Collects commits after your last successful Cliq post** using `git log --since … --until now` (commit timestamps). On the **first run ever**, it uses **local midnight today** as the lower bound.
+3. Writes **`.last-run`** with an ISO timestamp **only after Zoho accepts the webhook**, so failed runs retry the same window.
+4. If **no commits** appear in that window, it **does not post** and **does not** update `.last-run`.
+5. **Summarizes** with Gemini (`gemini-2.5-flash`), with **retries** on Gemini and Zoho. If Gemini fails, it falls back to a simple manual formatter.
+6. **Post-processing**: caps each bullet line to **30 words** max; the prompt asks for grouped themes (bug fixes, UI/UX, etc.) and treats **package.json version bumps** as **deployments**.
+
+See `index.js` for constants such as `MAX_STANDUP_BULLET_WORDS`, `MAX_CATCHUP_CALENDAR_DAYS`, and retry settings.
 
 ## Prerequisites
 
-- Node.js 18+ (LTS recommended)
-- Git installed and configured
-- A Google AI Studio API key (free)
-- A Zoho Cliq incoming webhook URL
+- **Node.js 18+** (20 LTS is fine)
+- **Git**
+- **Gemini API key** ([Google AI Studio](https://aistudio.google.com/app/apikey))
+- **Zoho Cliq incoming webhook URL**
+- Local clones of every repo listed in **`REPO_PATHS`** (`.env`)
 
-## 1. Project Setup
-
-### Step 1: Move to a Private Location
-
-Move this entire folder OUTSIDE your workspace repositories to a personal location:
+## Quick start
 
 ```bash
-# On macOS/Linux
-mv /Users/macbook/Repos/Timart/auto-daily-report ~/personal-automation/daily-standup-bot
-
-# Navigate to the new location
-cd ~/personal-automation/daily-standup-bot
-```
-
-### Step 2: Install Dependencies
-
-```bash
+cd /path/to/daily-standup-bot
 npm install
+cp .env.example .env
 ```
 
-This installs the `@google/genai` SDK and other dependencies.
+Edit **`.env`**:
 
-## 2. Configuration
+- **`GEMINI_API_KEY`**, **`ZOHO_WEBHOOK_URL`** (required)
+- **`REPO_PATHS`** (required) — see below
+- **`GIT_AUTHOR`** (optional; omit to include all authors in the commit window)
 
-### Get Your Credentials
-
-1. **Google Gemini API Key** (Free):
-   - Visit [Google AI Studio](https://aistudio.google.com/app/apikey)
-   - Create a new API key
-   - Copy the key for the next step
-
-2. **Zoho Cliq Webhook URL**:
-   - Open Zoho Cliq
-   - Go to the channel where you want to post updates
-   - Click the channel name → Settings → Integrations → Incoming Webhooks
-   - Add a new webhook and copy the URL
-
-### Configure the Script
-
-Open `index.js` and edit the **CONFIGURATION** section at the top:
-
-```javascript
-const GEMINI_API_KEY = "YOUR_GEMINI_API_KEY_HERE";
-const ZOHO_WEBHOOK_URL = "YOUR_ZOHO_WEBHOOK_URL_HERE";
-
-const REPO_PATHS = [
-  "/Users/macbook/Projects/company-frontend",
-  "/Users/macbook/Projects/company-backend",
-  "/Users/macbook/Projects/company-api",
-];
-
-const GIT_AUTHOR_PATTERN = "your.email@company.com"; // Optional: filter by your git email
-```
-
-## 3. Manual Testing
-
-Run the script manually to test everything works:
+Run manually:
 
 ```bash
 npm start
@@ -80,157 +43,117 @@ npm start
 node index.js
 ```
 
-You should see:
-1. Repository scanning progress
-2. Commit count per repository
-3. AI-generated summary
-4. Success confirmation from Zoho Cliq
+The script loads **`.env`** from the **same directory as `index.js`** (it does not overwrite variables already set in the shell).
 
-## 4. Automation Setup
+## Configuration (`.env`)
 
-Choose ONE of these automation methods:
+| Variable | Required | Notes |
+|----------|----------|--------|
+| `GEMINI_API_KEY` | Yes | Unless already exported in the environment |
+| `ZOHO_WEBHOOK_URL` | Yes | Incoming webhook URL |
+| `REPO_PATHS` | Yes | Absolute paths to git repos, separated by **`:`** (you may also use **`;`** or **newlines**). Duplicates are ignored. Example: `/Users/me/a:/Users/me/b` |
+| `GIT_AUTHOR` | No | Passed through as git `--author` filter; omit for all authors |
 
-### Option A: macOS Scheduler (launchd) - Recommended for Mac
+Copy from `.env.example` and fill in real values. **Do not commit `.env`.**
 
-1. Create a plist file:
+Paths must exist on the machine where the script runs (`launchd`, cron, Shortcuts, etc.).
 
-```bash
-mkdir -p ~/Library/LaunchAgents
-cat > ~/Library/LaunchAgents/com.user.daily-standup-bot.plist << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.user.daily-standup-bot</string>
-    
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/bin/node</string>
-        <string>REPLACE_WITH_FULL_PATH_TO_INDEX_JS</string>
-    </array>
-    
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>17</integer>
-        <key>Minute</key>
-        <integer>0</integer>
-    </dict>
-    
-    <key>StandardOutPath</key>
-    <string>/tmp/daily-standup-bot.out</string>
-    
-    <key>StandardErrorPath</key>
-    <string>/tmp/daily-standup-bot.err</string>
-    
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>GEMINI_API_KEY</key>
-        <string>YOUR_GEMINI_API_KEY_HERE</string>
-        <key>ZOHO_WEBHOOK_URL</key>
-        <string>YOUR_ZOHO_WEBHOOK_URL_HERE</string>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    </dict>
-</dict>
-</plist>
-EOF
-```
+## Scheduling (pick one)
 
-2. Edit the plist file to add your paths and credentials:
-   - Replace `REPLACE_WITH_FULL_PATH_TO_INDEX_JS` with the full path to your `index.js`
-   - Add your actual API key and webhook URL in the EnvironmentVariables section
+Running twice successfully on the same day with **new commits after the first post** can produce **two Cliq messages**; that is expected with the current `.last-run` design.
 
-3. Load and start the scheduler:
+### macOS — LaunchAgent (recommended): `launchd-setup.sh`
+
+Uses **`launchd`** with **no secrets in the plist**; credentials come from **`.env`** next to `index.js`.
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.user.daily-standup-bot.plist
-launchctl start com.user.daily-standup-bot
+cd /path/to/daily-standup-bot
+chmod +x launchd-setup.sh
+./launchd-setup.sh
 ```
 
-4. Verify it's loaded:
+Default schedule: **every day at 17:30** (5:30 PM) local time. Logs:
+
+- stdout: `/tmp/daily-standup-bot.out`
+- stderr: `/tmp/daily-standup-bot.err`
+
+Useful commands:
 
 ```bash
 launchctl list | grep daily-standup-bot
-```
-
-5. To unload (if needed):
-
-```bash
+launchctl start com.user.daily-standup-bot    # run once now
 launchctl unload ~/Library/LaunchAgents/com.user.daily-standup-bot.plist
 ```
 
-### Option B: Linux Cron Job
+**Sleep:** If the Mac is asleep at the scheduled time, that run may be skipped. The next successful run still collects commits **after the last successful post**, so work is not lost—as long as the job runs again while awake.
 
-1. Open your crontab:
+If you change install location, re-run `./launchd-setup.sh` (unload the old plist first if needed).
 
-```bash
-crontab -e
-```
+### macOS — Shortcuts
 
-2. Add this line (runs daily at 5:00 PM):
+Create a shortcut with **Run Shell Script**, for example:
 
 ```bash
-# Daily Standup Bot - runs at 5:00 PM every day
-0 17 * * * cd /path/to/daily-standup-bot && /usr/bin/node index.js >> /tmp/daily-standup-bot.log 2>&1
+cd "/path/to/daily-standup-bot" && /full/path/to/node index.js
 ```
 
-3. If you prefer environment variables in cron:
+Use `which node` for a reliable Node path (e.g. Homebrew). Add **Show Notification** after the script if you want a visible confirmation.
 
-```bash
-0 17 * * * export GEMINI_API_KEY="your-key"; export ZOHO_WEBHOOK_URL="your-webhook"; cd /path/to/daily-standup-bot && /usr/bin/node index.js >> /tmp/daily-standup-bot.log 2>&1
+### Linux — Cron
+
+**Preferred:** `cd` into the project so `.env` is loaded automatically:
+
+```cron
+30 17 * * * cd /path/to/daily-standup-bot && /usr/bin/node index.js >> /tmp/daily-standup-bot.log 2>&1
 ```
 
-4. View logs:
+Adjust the Node binary path (`which node`) and time as needed.
 
-```bash
-tail -f /tmp/daily-standup-bot.log
-```
+Optional helper **`cron-setup.sh`** exists but **embeds API keys in your crontab**; prefer `.env` + the line above unless you know why you need the script.
 
-### Option C: VS Code Global Task (Manual Trigger)
+### VS Code task
 
-See `vscode-global-task.json` for the configuration to add to your VS Code global tasks.
+See **`vscode-global-task.json`**. Copy the tasks into your user `tasks.json` and:
 
-This allows you to run the script via keyboard shortcut from any VS Code window.
-
-## 5. Environment Variables (Alternative to Hardcoding)
-
-Instead of editing the script, you can use environment variables:
-
-```bash
-export GEMINI_API_KEY="your-api-key"
-export ZOHO_WEBHOOK_URL="your-webhook-url"
-export GIT_AUTHOR="your.email@company.com"
-node index.js
-```
+- Replace **`${userHome}/personal-automation/daily-standup-bot`** with your real project path (or use a variable you prefer).
+- Prefer relying on **`.env`** in that folder instead of storing secrets in task JSON.
 
 ## Troubleshooting
 
-### No commits found
-- Verify your `REPO_PATHS` are correct absolute paths
-- Check that `GIT_AUTHOR_PATTERN` matches your git config: `git config user.email`
+### Reset the commit window
 
-### AI summarization fails
-- Verify your Gemini API key is valid and has quota remaining
-- Check that you're using a supported model (gemini-2.5-flash)
+Deleting **`.last-run`** in the project folder resets bookkeeping; the next weekday run treats the lower bound like a **first run** (commits since **local midnight today**). A new **`.last-run`** is written after the next **successful** Cliq post.
 
-### Zoho Cliq posting fails
-- Verify the webhook URL is correct and the webhook is active
-- Check Zoho Cliq channel permissions
+### No commits / no post
 
-### Script doesn't run on schedule
-- For macOS: Check `/tmp/daily-standup-bot.err` for errors
-- For Linux: Check the cron log file
-- Ensure Node.js path is correct in the scheduler config
+- Confirm **`REPO_PATHS`** in `.env` is set and each path exists and is a git repo.
+- Remember the window is **since last successful Zoho post**, not “calendar today only.”
+- If **`GIT_AUTHOR`** is set, it must match `git log` author filtering (`git config user.email`).
 
-## Security Notes
+### Weekend
 
-- This script stores credentials locally only
-- Never commit this folder to any git repository
-- The `launchd` plist stores credentials in the system keychain area
-- Consider using environment variables instead of hardcoding credentials
+If you run on Saturday/Sunday, the script exits with a short message and posts nothing.
+
+### AI or webhook errors
+
+- Check Gemini quota and API key.
+- Confirm webhook URL and channel permissions.
+- Inspect **`/tmp/daily-standup-bot.err`** (launchd) or your cron log.
+
+### Node / modules
+
+```bash
+npm install
+```
+
+If `Cannot find package '@google/genai'`, dependencies are missing.
+
+## Security
+
+- Keep **`.env`** local and **gitignored**.
+- **launchd plist** from `launchd-setup.sh` only sets **`PATH`**; secrets stay in **`.env`**.
+- Avoid committing webhook URLs or API keys into **tasks**, **shell history**, or **crontab** when `.env` is enough.
 
 ## License
 
-Private use only. Do not distribute credentials.
+MIT (see `package.json`). Treat credentials as confidential.
