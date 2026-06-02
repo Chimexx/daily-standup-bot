@@ -347,6 +347,38 @@ function deriveDateLabels(commits) {
   );
 }
 
+/**
+ * Log when this run is catching up after a missed day (or several) since the last successful post.
+ */
+function logCatchUpWindow(lastRunDate, now, commits) {
+  if (!lastRunDate || commits.length === 0) {
+    return;
+  }
+
+  const lastPostDay = startOfLocalDay(new Date(lastRunDate));
+  const todayDay = startOfLocalDay(now);
+  const commitDays = [...new Set(commits.map((c) => c.date))].sort();
+  const missedPostDay = lastPostDay < todayDay;
+
+  if (!missedPostDay && commitDays.length <= 1) {
+    return;
+  }
+
+  console.log("📦 Catch-up mode: combining work since your last successful post into this update.");
+  console.log(`   Last successful post: ${new Date(lastRunDate).toLocaleString()}`);
+
+  if (missedPostDay) {
+    console.log(
+      "   At least one calendar day had no successful post; commits from those days are included now.",
+    );
+  }
+
+  if (commitDays.length > 1) {
+    const labels = deriveDateLabels(commits);
+    console.log(`   Commit dates in this update: ${labels.join(" → ")}`);
+  }
+}
+
 // ============================================================================
 // SYSTEM PROMPT FOR GEMINI
 // ============================================================================
@@ -533,7 +565,11 @@ async function summarizeCommits(commits, dateLabels, manualNotes = []) {
       ? " Non-git manual items will be appended automatically under \"Other (not from git)\"—summarize commits only and do not list those items. "
       : "";
 
-  const userPrompt = `Here are my git commits ${dateDescription}:\n\n${commitsText}\n\nPlease generate my daily standup update.${manualNoteHint}${isMultiDay ? "Commits span multiple calendar days: keep chronological order; you may use plain subsection headings with full dates under a repo if helpful—do not prefix bullets with weekdays like Mon/Tue. " : ""}Commits that bump version in package.json (or similar) indicate a shipped build—call those out explicitly with version numbers. Each bullet point (each • line) must be at most ${MAX_STANDUP_BULLET_WORDS} words—count words only within that line after the bullet marker.`;
+  const catchUpHint = isMultiDay
+    ? "This update covers multiple calendar days because earlier days had no successful post—use Date: as a range in the header and group work chronologically (optional dated subsection lines under each repo). Do not prefix bullets with weekdays like Mon/Tue. "
+    : "";
+
+  const userPrompt = `Here are my git commits ${dateDescription}:\n\n${commitsText}\n\nPlease generate my daily standup update.${manualNoteHint}${catchUpHint}Commits that bump version in package.json (or similar) indicate a shipped build—call those out explicitly with version numbers. Each bullet point (each • line) must be at most ${MAX_STANDUP_BULLET_WORDS} words—count words only within that line after the bullet marker.`;
 
   console.log(`\n🤖 Sending to Gemini AI for summarization${isMultiDay ? " (multi-day)" : ""}...`);
 
@@ -697,6 +733,8 @@ async function main() {
 
   const commits = aggregateCommitsSince(sinceBoundary, now);
   let dateLabels = deriveDateLabels(commits);
+
+  logCatchUpWindow(lastRunDate, now, commits);
 
   if (commits.length === 0 && manualNotes.length === 0) {
     console.log("\n📝 No new commits since the last post and no manual notes.");

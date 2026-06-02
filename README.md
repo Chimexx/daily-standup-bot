@@ -5,8 +5,8 @@ Local Node.js automation that collects **new git commits** across several reposi
 ## What it does
 
 1. **Runs only Monday–Friday** (weekends exit immediately; nothing is posted).
-2. **Collects commits after your last successful Cliq post** using `git log --since … --until now` (commit timestamps). On the **first run ever**, it uses **local midnight today** as the lower bound.
-3. Writes **`.last-run`** with an ISO timestamp **only after Zoho accepts the webhook**, so failed runs retry the same window.
+2. **Collects commits after your last successful Cliq post** using `git log --since … --until now` (not “today only”). If Tuesday’s post failed or never ran but you committed Tuesday, **Wednesday’s successful run includes Tuesday + Wednesday** in one update. On the **first run ever**, it uses **local midnight today** as the lower bound.
+3. Writes **`.last-run`** with an ISO timestamp **only after Zoho accepts the webhook**, so failed runs retry the same window until a post succeeds.
 4. If there are **no commits and no manual notes**, it **does not post** and **does not** update `.last-run`.
 5. **Manual notes** in `standup-notes.txt` (lines starting with `-`) are included in the Cliq message and **cleared only after a successful post**—so items added after 5:30 PM or on a missed run day roll into the next successful run.
 6. **Summarizes** with Gemini (`gemini-2.5-flash`), with **retries** on Gemini and Zoho. If Gemini fails, it falls back to a simple manual formatter.
