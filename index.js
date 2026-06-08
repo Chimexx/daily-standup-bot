@@ -347,6 +347,54 @@ function deriveDateLabels(commits) {
   );
 }
 
+/** Full calendar label for a commit date (YYYY-MM-DD), e.g. "Saturday, May 17, 2026". */
+function formatCommitCalendarDay(ymd) {
+  return new Date(`${ymd}T12:00:00`).toLocaleDateString("en-US", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+}
+
+function formatYmd(date) {
+  const d = new Date(date);
+  const pad = (n) => n.toString().padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function isWeekendYmd(ymd) {
+  return isWeekend(new Date(`${ymd}T12:00:00`));
+}
+
+/**
+ * Relabel Saturday/Sunday commit dates to the posting weekday so weekend work
+ * is grouped under Monday (or whichever weekday this standup is successfully sent).
+ * @returns {{ commits: typeof commits, relabeled: number }}
+ */
+function normalizeWeekendCommitsToPostDay(commits, postDate) {
+  const postYmd = formatYmd(postDate);
+  let relabeled = 0;
+  const normalized = commits.map((c) => {
+    if (isWeekendYmd(c.date)) {
+      relabeled++;
+      return { ...c, date: postYmd };
+    }
+    return c;
+  });
+  return { commits: normalized, relabeled };
+}
+
+/** Extra Gemini instructions when commits span multiple calendar days (incl. catch-up). */
+function buildMultiDayPromptHint(commits) {
+  const distinctDays = new Set(commits.map((c) => c.date)).size;
+  if (distinctDays <= 1) {
+    return "";
+  }
+
+  return "Commits span multiple calendar days (catch-up since the last successful post). Use Date: as the full span in the header. Under EACH repository, add a plain subsection heading for every distinct commit date before that day's bullets (full calendar date from each [YYYY-MM-DD] line). ";
+}
+
 /**
  * Log when this run is catching up after a missed day (or several) since the last successful post.
  */
@@ -412,8 +460,8 @@ Date: [Date range if multiple days, or single date]
 • [Summary of work]
 
 DATE LINES VS BULLETS:
-The required standup header includes Date: [single date or range]. Do not prefix bullets with weekdays (Mon, Tue, …) or repeat calendar dates on every bullet — the header already provides timing context.
-If commits span several calendar days and separating days avoids confusion, under that repository only insert plain (non-bullet) subsection headings before grouped bullets, such as "June 9, 2026" or "2026-06-09" — never weekday abbreviations on bullets themselves.
+The standup header Date: line shows the span of commit dates (or a single date). Do not prefix bullets with short weekdays (Mon, Tue, …).
+When commits span more than one calendar day, under each repository insert a plain (non-bullet) subsection heading for every distinct commit date before that day's bullets (full calendar date from each [YYYY-MM-DD] line). Weekend commits are already dated to the posting weekday in the input—group them with that day's work, not under Saturday/Sunday headings.
 
 DEPLOYMENT / VERSION BUMPS:
 Treat commits as a production or build deployment when they clearly bump app/package version, especially when package.json (or similar manifest) is mentioned. Examples: "update version to 26.5.18 in package.json", "bump version to 1.2.3", "chore: release 2.0.0".
@@ -435,7 +483,7 @@ LENGTH (STRICT):
 GUIDELINES:
 - Convert technical commit messages into plain English accomplishments
 - Merge multiple related commits into single bullet points
-- If commits span multiple days, keep chronological order; optional dated subsection headings (plain lines, full calendar dates only when necessary)—never prefix individual bullets with weekdays or repeated dates
+- If commits span multiple days, keep chronological order and required per-date subsection headings (full calendar dates from the input)
 - Remove commit hashes, file names, and technical jargon (except version numbers for deployment bullets)
 - If commits are substantive bug fixes, you may still phrase as "Fixed issue with..." or "Resolved..."; merge tiny fixes into a Bug fixes umbrella line
 - If commits are substantive features, phrase as "Implemented..." or "Added..."; merge cosmetic-only work into a UI / UX updates umbrella line
@@ -565,9 +613,7 @@ async function summarizeCommits(commits, dateLabels, manualNotes = []) {
       ? " Non-git manual items will be appended automatically under \"Other (not from git)\"—summarize commits only and do not list those items. "
       : "";
 
-  const catchUpHint = isMultiDay
-    ? "This update covers multiple calendar days because earlier days had no successful post—use Date: as a range in the header and group work chronologically (optional dated subsection lines under each repo). Do not prefix bullets with weekdays like Mon/Tue. "
-    : "";
+  const catchUpHint = buildMultiDayPromptHint(commits);
 
   const userPrompt = `Here are my git commits ${dateDescription}:\n\n${commitsText}\n\nPlease generate my daily standup update.${manualNoteHint}${catchUpHint}Commits that bump version in package.json (or similar) indicate a shipped build—call those out explicitly with version numbers. Each bullet point (each • line) must be at most ${MAX_STANDUP_BULLET_WORDS} words—count words only within that line after the bullet marker.`;
 
@@ -731,7 +777,17 @@ async function main() {
     console.log("   (Kept until a successful post—includes notes added after a missed or early run.)\n");
   }
 
-  const commits = aggregateCommitsSince(sinceBoundary, now);
+  let commits = aggregateCommitsSince(sinceBoundary, now);
+  const { commits: normalizedCommits, relabeled: weekendRelabeled } =
+    normalizeWeekendCommitsToPostDay(commits, now);
+  commits = normalizedCommits;
+
+  if (weekendRelabeled > 0) {
+    console.log(
+      `📅 Grouped ${weekendRelabeled} weekend commit(s) under ${formatCommitCalendarDay(formatYmd(now))} for this post.\n`,
+    );
+  }
+
   let dateLabels = deriveDateLabels(commits);
 
   logCatchUpWindow(lastRunDate, now, commits);
@@ -911,12 +967,7 @@ function formatCommitsManually(commits, dateLabels) {
     for (const date of sortedDates) {
       const messages = dates[date];
       if (isMultiDay) {
-        const displayDate = new Date(date).toLocaleDateString("en-US", {
-          weekday: "short",
-          month: "short",
-          day: "numeric",
-        });
-        message += `  [${displayDate}]\n`;
+        message += `${formatCommitCalendarDay(date)}\n`;
       }
       for (const msg of messages) {
         message += `  • ${manualBulletFromCommit(repo, msg)}\n`;
