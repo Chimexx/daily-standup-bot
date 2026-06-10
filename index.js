@@ -5,7 +5,7 @@
  * and posts them to Zoho Cliq via incoming webhook.
  *
  * Setup:
- * 1. Create a .env file with GEMINI_API_KEY, ZOHO_WEBHOOK_URL, and REPO_PATHS (colon-separated repo paths)
+ * 1. Create a .env file with GEMINI_API_KEY and ZOHO_WEBHOOK_URL; copy repos.example.txt to repos.txt
  * 2. Optional: standup-notes.txt — lines starting with "-" for non-git work (cleared after a successful post)
  * 3. Run: node index.js
  */
@@ -70,6 +70,46 @@ function parseRepoPaths(raw) {
   return [...new Set(paths)];
 }
 
+function resolveRepoPathsFile() {
+  const configured = process.env.REPO_PATHS_FILE?.trim();
+  if (configured) {
+    return configured.startsWith("/") ? configured : join(__dirname, configured);
+  }
+  return join(__dirname, "repos.txt");
+}
+
+function loadRepoPathsFromFile(filePath) {
+  if (!existsSync(filePath)) {
+    return [];
+  }
+  return [
+    ...new Set(
+      readFileSync(filePath, "utf-8")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith("#")),
+    ),
+  ];
+}
+
+function loadRepoPaths() {
+  const filePath = resolveRepoPathsFile();
+  const fromFile = loadRepoPathsFromFile(filePath);
+  if (fromFile.length > 0) {
+    return fromFile;
+  }
+
+  const fromEnv = parseRepoPaths(process.env.REPO_PATHS);
+  if (fromEnv.length > 0) {
+    console.warn(
+      "⚠️  Using REPO_PATHS from .env — prefer repos.txt (see repos.example.txt).",
+    );
+    return fromEnv;
+  }
+
+  return [];
+}
+
 // ============================================================================
 // CONFIGURATION - Edit these values
 // ============================================================================
@@ -80,8 +120,8 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "YOUR_GEMINI_API_KEY_HERE";
 /** Your Zoho Cliq Incoming Webhook URL (get from Zoho Cliq channel settings) */
 const ZOHO_WEBHOOK_URL = process.env.ZOHO_WEBHOOK_URL || "YOUR_ZOHO_WEBHOOK_URL_HERE";
 
-/** Absolute paths to local git repos — set REPO_PATHS in .env (colon-separated) */
-const REPO_PATHS = parseRepoPaths(process.env.REPO_PATHS);
+/** Absolute paths to local git repos — set in repos.txt (see repos.example.txt) */
+const REPO_PATHS = loadRepoPaths();
 
 /** Your git author name/email pattern to match commits */
 const GIT_AUTHOR_PATTERN = process.env.GIT_AUTHOR || ""; // e.g., "john.doe@company.com" or "John Doe"
@@ -751,7 +791,7 @@ async function main() {
   // Validate configuration
   if (REPO_PATHS.length === 0) {
     console.error(
-      "❌ No repositories configured. Set REPO_PATHS in .env (colon-separated absolute paths) or export REPO_PATHS.",
+      "❌ No repositories configured. Copy repos.example.txt to repos.txt and add your local git paths.",
     );
     process.exit(1);
   }

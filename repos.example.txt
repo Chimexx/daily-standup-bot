@@ -1,0 +1,4 @@
+# One absolute local git repo path per line. Lines starting with # are ignored.
+# Copy to repos.txt and edit for your machine (repos.txt is gitignored).
+/Users/you/Repos/project-a
+/Users/you/Repos/project-b

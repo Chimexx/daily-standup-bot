@@ -20,7 +20,7 @@ See `index.js` for constants such as `MAX_STANDUP_BULLET_WORDS`, `MAX_CATCHUP_CA
 - **Git**
 - **Gemini API key** ([Google AI Studio](https://aistudio.google.com/app/apikey))
 - **Zoho Cliq incoming webhook URL**
-- Local clones of every repo listed in **`REPO_PATHS`** (`.env`)
+- Local clones of every repo listed in **`repos.txt`**
 
 ## Quick start
 
@@ -28,13 +28,15 @@ See `index.js` for constants such as `MAX_STANDUP_BULLET_WORDS`, `MAX_CATCHUP_CA
 cd /path/to/daily-standup-bot
 npm install
 cp .env.example .env
+cp repos.example.txt repos.txt
 ```
 
 Edit **`.env`**:
 
 - **`GEMINI_API_KEY`**, **`ZOHO_WEBHOOK_URL`** (required)
-- **`REPO_PATHS`** (required) — see below
 - **`GIT_AUTHOR`** (optional; omit to include all authors in the commit window)
+
+Edit **`repos.txt`** with your local git repo paths (see below).
 
 Run manually:
 
@@ -46,18 +48,34 @@ node index.js
 
 The script loads **`.env`** from the **same directory as `index.js`** (it does not overwrite variables already set in the shell).
 
+## Repositories (`repos.txt`)
+
+Local git repo paths are stored in **`repos.txt`** (not committed — see `.gitignore`). Copy the example and edit:
+
+```bash
+cp repos.example.txt repos.txt
+```
+
+```text
+# One absolute path per line; # comments are allowed
+/Users/you/Repos/project-a
+/Users/you/Repos/project-b
+```
+
+Paths must exist on the machine where the script runs (`launchd`, cron, Shortcuts, etc.).
+
+Optional: set **`REPO_PATHS_FILE`** in `.env` to use a different file path.
+
 ## Configuration (`.env`)
 
 | Variable | Required | Notes |
 |----------|----------|--------|
 | `GEMINI_API_KEY` | Yes | Unless already exported in the environment |
 | `ZOHO_WEBHOOK_URL` | Yes | Incoming webhook URL |
-| `REPO_PATHS` | Yes | Absolute paths to git repos, separated by **`:`** (you may also use **`;`** or **newlines**). Duplicates are ignored. Example: `/Users/me/a:/Users/me/b` |
 | `GIT_AUTHOR` | No | Passed through as git `--author` filter; omit for all authors |
+| `REPO_PATHS_FILE` | No | Path to repo list file (default: `repos.txt`) |
 
-Copy from `.env.example` and fill in real values. **Do not commit `.env`.**
-
-Paths must exist on the machine where the script runs (`launchd`, cron, Shortcuts, etc.).
+Copy from `.env.example` and fill in real values. **Do not commit `.env` or `repos.txt`.**
 
 ## Manual notes (non-git work)
 
@@ -132,7 +150,7 @@ cd "/Users/macbook/daily-standup-bot" && /opt/homebrew/opt/node@20/bin/node inde
 | Cause | What you’ll see in the log |
 |--------|----------------------------|
 | Wrong file / path | `node not found` or `Cannot find module` |
-| No `.env` or empty `REPO_PATHS` | `No repositories configured` |
+| Missing `repos.txt` or empty repo list | `No repositories configured` |
 | No new commits **and** empty `standup-notes.txt` | `No standup update will be posted` (exit 0 — shortcut “succeeds” but Cliq is silent) |
 | Weekend | `It's the weekend!` |
 | Zoho/Gemini error | `Failed to post` / `AI summarization failed` |
@@ -199,7 +217,7 @@ Deleting **`.last-run`** in the project folder resets bookkeeping; the next week
 
 ### No commits / no post
 
-- Confirm **`REPO_PATHS`** in `.env` is set and each path exists and is a git repo.
+- Confirm **`repos.txt`** exists and each path exists and is a git repo.
 - Remember the window is **since last successful Zoho post**, not “calendar today only.”
 - If **`GIT_AUTHOR`** is set, it must match `git log` author filtering (`git config user.email`).
 - Add items to **`standup-notes.txt`** (lines starting with `-`) to post when there are no new commits.
