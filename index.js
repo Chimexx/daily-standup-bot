@@ -294,7 +294,7 @@ function formatNotesOnlyManually(notes) {
     day: "numeric",
   });
   const lines = notes.map((n) => `• ${truncateWords(n)}`);
-  return `📅 Daily Update\nDate: ${date}\n\nOther (not from git):\n${lines.join("\n")}`;
+  return `📅 Daily Update\nDate: ${date}\n\nOther (not captured by git):\n${lines.join("\n")}`;
 }
 
 /**
@@ -1307,7 +1307,7 @@ function formatCommitsManually(commits, dateLabels) {
     return acc;
   }, {});
 
-  let message = `📋 Daily Standup Update - ${dateHeader}\n\n`;
+  let message = `📅 Daily Update\nDate: ${dateHeader}\n\n`;
 
   for (const [repo, dates] of Object.entries(byRepoAndDate)) {
     message += `${repo}:\n`;
