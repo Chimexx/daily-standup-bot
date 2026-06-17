@@ -126,6 +126,21 @@ const REPO_PATHS = loadRepoPaths();
 /** Your git author name/email pattern to match commits */
 const GIT_AUTHOR_PATTERN = process.env.GIT_AUTHOR || ""; // e.g., "john.doe@company.com" or "John Doe"
 
+/** GitHub token for PR lookup (private repos). Repo basenames in PR_LINK_REPOS get PR URLs appended when eligible. */
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "";
+const PR_LINK_REPO_NAMES = (process.env.PR_LINK_REPOS || "mx-quick-manager-backend")
+  .split(/[,;]+/)
+  .map((name) => name.trim())
+  .filter(Boolean);
+const DEFAULT_GIT_BRANCHES = new Set([
+  "main",
+  "master",
+  "develop",
+  "development",
+  "staging",
+  "production",
+]);
+
 /** Model to use for summarization */
 const GEMINI_MODEL = "gemini-2.5-flash";
 
@@ -138,6 +153,9 @@ const MAX_CATCHUP_CALENDAR_DAYS = 14;
 /** Retries for outbound API calls (Wi‑Fi reconnecting after wake, transient errors) */
 const API_RETRY_ATTEMPTS = 3;
 const API_RETRY_DELAY_MS = 1500;
+
+/** Set DRY_RUN=1 to print the message without posting to Zoho or updating .last-run */
+const DRY_RUN = /^(1|true|yes)$/i.test(process.env.DRY_RUN || "");
 
 /** File to track last successful run date */
 const LAST_RUN_FILE = join(__dirname, ".last-run");
@@ -541,7 +559,7 @@ GUIDELINES:
  * @param {string} repoPath
  * @param {Date} sinceDate exclusive lower bound in local time (matches git log --since)
  * @param {Date} untilDate upper bound (now)
- * @returns {Array<{repo: string, message: string, date: string}>}
+ * @returns {Array<{repo: string, message: string, date: string, sha: string}>}
  */
 function extractCommitsSince(repoPath, sinceDate, untilDate = new Date()) {
   const repoName = basename(repoPath);
@@ -549,7 +567,7 @@ function extractCommitsSince(repoPath, sinceDate, untilDate = new Date()) {
   try {
     const sinceStr = formatLocalGitTimestamp(sinceDate);
     const untilStr = formatLocalGitTimestamp(untilDate);
-    let command = `git -C "${repoPath}" log --since="${sinceStr}" --until="${untilStr}" --no-merges --pretty=format:"%cs%x09%s"`;
+    let command = `git -C "${repoPath}" log --since="${sinceStr}" --until="${untilStr}" --no-merges --pretty=format:"%H%x09%cs%x09%s"`;
 
     if (GIT_AUTHOR_PATTERN) {
       command += ` --author="${GIT_AUTHOR_PATTERN}"`;
@@ -571,19 +589,19 @@ function extractCommitsSince(repoPath, sinceDate, untilDate = new Date()) {
       if (!trimmed) {
         continue;
       }
-      const tab = trimmed.indexOf("\t");
-      if (tab === -1) {
+      const parts = trimmed.split("\t");
+      if (parts.length < 3) {
         continue;
       }
-      const dateStr = trimmed.slice(0, tab).trim();
-      const message = trimmed.slice(tab + 1).trim();
-      if (!message) {
+      const [sha, dateStr, message] = parts;
+      if (!sha || !message) {
         continue;
       }
       commits.push({
         repo: repoName,
-        message,
-        date: dateStr,
+        message: message.trim(),
+        date: dateStr.trim(),
+        sha: sha.trim(),
       });
     }
 
@@ -621,6 +639,288 @@ function aggregateCommitsSince(sinceBoundary, untilDate = new Date()) {
   allCommits.sort((a, b) => a.date.localeCompare(b.date) || a.repo.localeCompare(b.repo) || a.message.localeCompare(b.message));
 
   return allCommits;
+}
+
+// ============================================================================
+// GITHUB PULL REQUEST LINKS (selected repos)
+// ============================================================================
+
+/**
+ * @param {string} repoPath
+ * @returns {{ owner: string, repo: string } | null}
+ */
+function parseGitHubRemote(repoPath) {
+  try {
+    const url = execSync(`git -C "${repoPath}" remote get-url origin`, {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+    }).trim();
+    const match = url.match(/github\.com[:/]([^/]+)\/([^/.]+?)(?:\.git)?$/i);
+    if (!match) {
+      return null;
+    }
+    return { owner: match[1], repo: match[2] };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @param {string} repoPath
+ * @param {string} sha
+ * @returns {string[]}
+ */
+function getBranchesContainingCommit(repoPath, sha) {
+  try {
+    const output = execSync(
+      `git -C "${repoPath}" branch -a --contains "${sha}" --format="%(refname:short)"`,
+      {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 10000,
+      },
+    ).trim();
+    if (!output) {
+      return [];
+    }
+    return [
+      ...new Set(
+        output
+          .split("\n")
+          .map((branch) => branch.trim().replace(/^origin\//, ""))
+          .filter(Boolean),
+      ),
+    ];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Prefer a feature branch over main/master-style defaults.
+ * @param {string} repoPath
+ * @param {string} sha
+ * @returns {string | null}
+ */
+function getFeatureBranchForCommit(repoPath, sha) {
+  const branches = getBranchesContainingCommit(repoPath, sha);
+  const feature = branches.find((branch) => {
+    const leaf = branch.split("/").pop() ?? branch;
+    return !DEFAULT_GIT_BRANCHES.has(leaf);
+  });
+  return feature ?? null;
+}
+
+/**
+ * Include PR link on the post day, or on the first weekday after a weekend PR open.
+ * Skip if the PR was opened on an earlier weekday (already surfaced in a prior post).
+ * @param {string | Date} prCreatedAt
+ * @param {Date} postDate
+ */
+function shouldIncludePrLink(prCreatedAt, postDate) {
+  const created = new Date(prCreatedAt);
+  if (sameLocalCalendarDay(created, postDate)) {
+    return true;
+  }
+
+  const createdDay = startOfLocalDay(created);
+  const postDay = startOfLocalDay(postDate);
+  if (createdDay >= postDay) {
+    return false;
+  }
+
+  if (!isWeekend(created)) {
+    return false;
+  }
+
+  let cursor = addCalendarDays(createdDay, 1);
+  while (cursor < postDay) {
+    if (!isWeekend(cursor)) {
+      return false;
+    }
+    cursor = addCalendarDays(cursor, 1);
+  }
+
+  return !isWeekend(postDate);
+}
+
+function sameLocalCalendarDay(a, b) {
+  const left = startOfLocalDay(a);
+  const right = startOfLocalDay(b);
+  return left.getTime() === right.getTime();
+}
+
+/**
+ * @param {string} path
+ * @param {string} token
+ * @returns {Promise<unknown>}
+ */
+async function githubApiRequest(path, token) {
+  const response = await fetch(`https://api.github.com${path}`, {
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${token}`,
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`GitHub API ${response.status}: ${body}`);
+  }
+  return response.json();
+}
+
+/**
+ * @typedef {{ number: number, html_url: string, title: string, created_at: string }} GitHubPullRequest
+ */
+
+/**
+ * @param {string} owner
+ * @param {string} repo
+ * @param {string} repoPath
+ * @param {string} sha
+ * @param {string} token
+ * @returns {Promise<GitHubPullRequest | null>}
+ */
+async function findPullRequestForCommit(owner, repo, repoPath, sha, token) {
+  /** @type {GitHubPullRequest[] | null} */
+  const fromCommit = await githubApiRequest(
+    `/repos/${owner}/${repo}/commits/${sha}/pulls`,
+    token,
+  );
+  if (Array.isArray(fromCommit) && fromCommit.length > 0) {
+    return fromCommit[0];
+  }
+
+  const branch = getFeatureBranchForCommit(repoPath, sha);
+  if (!branch) {
+    return null;
+  }
+
+  const head = `${owner}:${branch}`;
+  /** @type {GitHubPullRequest[] | null} */
+  const fromBranch = await githubApiRequest(
+    `/repos/${owner}/${repo}/pulls?state=all&head=${encodeURIComponent(head)}&per_page=5`,
+    token,
+  );
+  if (Array.isArray(fromBranch) && fromBranch.length > 0) {
+    return fromBranch[0];
+  }
+
+  return null;
+}
+
+/**
+ * @param {string} repoName
+ * @returns {string | null}
+ */
+function resolveRepoPathForPrLinks(repoName) {
+  return (
+    REPO_PATHS.find((repoPath) => basename(repoPath) === repoName) ??
+    REPO_PATHS.find((repoPath) => repoPath.endsWith(`/${repoName}`)) ??
+    null
+  );
+}
+
+/**
+ * @param {Array<{repo: string, message: string, date: string, sha: string}>} commits
+ * @param {Date} postDate
+ * @returns {Promise<Array<{ url: string, title: string, number: number }>>}
+ */
+async function collectEligiblePrLinks(commits, postDate) {
+  if (!GITHUB_TOKEN || PR_LINK_REPO_NAMES.length === 0) {
+    if (PR_LINK_REPO_NAMES.length > 0 && commits.some((c) => PR_LINK_REPO_NAMES.includes(c.repo))) {
+      console.warn(
+        "⚠️  Set GITHUB_TOKEN in .env to append pull request links for mx-quick-manager-backend.",
+      );
+    }
+    return [];
+  }
+
+  const eligible = [];
+
+  for (const repoName of PR_LINK_REPO_NAMES) {
+    const repoCommits = commits.filter((commit) => commit.repo === repoName);
+    if (repoCommits.length === 0) {
+      continue;
+    }
+
+    const repoPath = resolveRepoPathForPrLinks(repoName);
+    if (!repoPath) {
+      console.warn(`⚠️  PR links: ${repoName} is configured but not found in repos.txt.`);
+      continue;
+    }
+
+    const github = parseGitHubRemote(repoPath);
+    if (!github) {
+      console.warn(`⚠️  PR links: could not parse GitHub remote for ${repoName}.`);
+      continue;
+    }
+
+    const seen = new Set();
+    const uniqueShas = [...new Set(repoCommits.map((commit) => commit.sha))];
+    let skippedOlderPr = 0;
+
+    for (const sha of uniqueShas) {
+      let pullRequest;
+      try {
+        pullRequest = await findPullRequestForCommit(
+          github.owner,
+          github.repo,
+          repoPath,
+          sha,
+          GITHUB_TOKEN,
+        );
+      } catch (error) {
+        console.warn(`⚠️  PR lookup failed for ${repoName}@${sha.slice(0, 7)}: ${error.message}`);
+        continue;
+      }
+
+      if (!pullRequest || seen.has(pullRequest.number)) {
+        continue;
+      }
+
+      if (!shouldIncludePrLink(pullRequest.created_at, postDate)) {
+        skippedOlderPr++;
+        console.log(
+          `   ↳ PR #${pullRequest.number} skipped (opened ${new Date(pullRequest.created_at).toLocaleDateString()}, not eligible for today's link).`,
+        );
+        continue;
+      }
+
+      seen.add(pullRequest.number);
+      eligible.push({
+        url: pullRequest.html_url,
+        title: pullRequest.title,
+        number: pullRequest.number,
+      });
+    }
+
+    if (skippedOlderPr > 0) {
+      console.log(
+        `   (${skippedOlderPr} PR(s) found for ${repoName} but omitted — opened before today on a weekday.)`,
+      );
+    }
+  }
+
+  eligible.sort((a, b) => a.number - b.number);
+  return eligible;
+}
+
+/**
+ * @param {string} summary
+ * @param {Array<{ url: string, title: string, number: number }>} prLinks
+ */
+function appendPrLinksSection(summary, prLinks) {
+  if (prLinks.length === 0) {
+    return summary;
+  }
+  const lines = prLinks.map((pr) => `• ${pr.url}`);
+  return `${summary.trim()}\n\n🔗 Pull requests:\n${lines.join("\n")}`;
 }
 
 // ============================================================================
@@ -873,6 +1173,12 @@ async function main() {
 
   summary = enforceMaxWordsPerBullet(summary);
 
+  const prLinks = await collectEligiblePrLinks(commits, now);
+  if (prLinks.length > 0) {
+    console.log(`\n🔗 Appending ${prLinks.length} pull request link(s) opened for this post.`);
+    summary = appendPrLinksSection(summary, prLinks);
+  }
+
   // Step 3: Display the summary
   console.log("\n" + "=".repeat(60));
   console.log("📋 GENERATED STANDUP UPDATE:");
@@ -881,6 +1187,11 @@ async function main() {
   console.log("=".repeat(60));
 
   // Step 4: Post to Zoho Cliq
+  if (DRY_RUN) {
+    console.log("\n🧪 DRY_RUN: Skipping Zoho post (.last-run and standup-notes unchanged).");
+    process.exit(0);
+  }
+
   try {
     await postToZohoCliq(summary);
     console.log("\n🎉 Standup update completed successfully!");

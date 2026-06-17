@@ -11,6 +11,7 @@ Local Node.js automation that collects **new git commits** across several reposi
 5. **Manual notes** in `standup-notes.txt` (lines starting with `-`) are included in the Cliq message and **cleared only after a successful post**—so items added after 5:30 PM or on a missed run day roll into the next successful run.
 6. **Summarizes** with Gemini (`gemini-2.5-flash`), with **retries** on Gemini and Zoho. If Gemini fails, it falls back to a simple manual formatter.
 7. **Post-processing**: caps each bullet line to **30 words** max; the prompt asks for grouped themes (bug fixes, UI/UX, etc.) and treats **package.json version bumps** as **deployments**.
+8. **`mx-quick-manager-backend` PR links**: when **`GITHUB_TOKEN`** is set, appends pull request URLs for commits in that repo. A link is included only the **first time** it would appear—when the PR was **opened the same calendar day** as the post, or when the PR was opened on a **weekend** and this is the **first weekday** post after that. PRs opened on an earlier weekday are omitted (no repeat links).
 
 See `index.js` for constants such as `MAX_STANDUP_BULLET_WORDS`, `MAX_CATCHUP_CALENDAR_DAYS`, and retry settings.
 
@@ -73,6 +74,8 @@ Optional: set **`REPO_PATHS_FILE`** in `.env` to use a different file path.
 | `GEMINI_API_KEY` | Yes | Unless already exported in the environment |
 | `ZOHO_WEBHOOK_URL` | Yes | Incoming webhook URL |
 | `GIT_AUTHOR` | No | Passed through as git `--author` filter; omit for all authors |
+| `GITHUB_TOKEN` | No | GitHub PAT for PR links (`repo` scope); alias `GH_TOKEN` also works |
+| `PR_LINK_REPOS` | No | Comma-separated repo folder names for PR links (default: `mx-quick-manager-backend`) |
 | `REPO_PATHS_FILE` | No | Path to repo list file (default: `repos.txt`) |
 
 Copy from `.env.example` and fill in real values. **Do not commit `.env` or `repos.txt`.**
