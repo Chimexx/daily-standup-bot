@@ -157,8 +157,60 @@ const API_RETRY_DELAY_MS = 1500;
 /** Set DRY_RUN=1 to print the message without posting to Zoho or updating .last-run */
 const DRY_RUN = /^(1|true|yes)$/i.test(process.env.DRY_RUN || "");
 
-/** File to track last successful run date */
-const LAST_RUN_FILE = join(__dirname, ".last-run");
+/** Overwritten each run; holds errors from the latest run only (empty on success). */
+const ERROR_LOG_FILE = process.env.ERROR_LOG_FILE
+  ? process.env.ERROR_LOG_FILE.startsWith("/")
+    ? process.env.ERROR_LOG_FILE
+    : join(__dirname, process.env.ERROR_LOG_FILE)
+  : join(__dirname, "standup-errors.txt");
+
+/** Errors collected during the current run (flushed to ERROR_LOG_FILE). */
+const runErrors = [];
+let errorLogInitialized = false;
+
+/**
+ * Clear the error log at the start of each run.
+ */
+function initErrorLog() {
+  runErrors.length = 0;
+  errorLogInitialized = true;
+  try {
+    writeFileSync(ERROR_LOG_FILE, "", "utf-8");
+  } catch (error) {
+    console.warn(`⚠️  Could not initialize error log (${ERROR_LOG_FILE}):`, error.message);
+  }
+}
+
+/**
+ * Record an error for this run and overwrite the error log file.
+ * @param {string} message
+ * @param {Error | unknown} [error]
+ */
+function recordRunError(message, error) {
+  const timestamp = new Date().toLocaleString();
+  let entry = `[${timestamp}] ${message}`;
+  if (error instanceof Error) {
+    entry += `\n${error.message}`;
+    if (error.stack) {
+      entry += `\n${error.stack}`;
+    }
+  } else if (error !== undefined && error !== null) {
+    entry += `\n${String(error)}`;
+  }
+  runErrors.push(entry);
+  try {
+    writeFileSync(ERROR_LOG_FILE, `${runErrors.join("\n\n")}\n`, "utf-8");
+  } catch (writeError) {
+    console.warn(`⚠️  Could not write error log (${ERROR_LOG_FILE}):`, writeError.message);
+  }
+}
+
+/** File to track last successful run date (override with LAST_RUN_FILE for testing) */
+const LAST_RUN_FILE = process.env.LAST_RUN_FILE
+  ? process.env.LAST_RUN_FILE.startsWith("/")
+    ? process.env.LAST_RUN_FILE
+    : join(__dirname, process.env.LAST_RUN_FILE)
+  : join(__dirname, ".last-run");
 
 /**
  * Pending manual standup items (lines starting with "-"). Cleared only after a successful Zoho post.
@@ -450,7 +502,7 @@ function buildMultiDayPromptHint(commits) {
     return "";
   }
 
-  return "Commits span multiple calendar days (catch-up since the last successful post). Use Date: as the full span in the header. Under EACH repository, add a plain subsection heading for every distinct commit date before that day's bullets (full calendar date from each [YYYY-MM-DD] line). ";
+  return "IMPORTANT: These commits span multiple calendar days because an earlier post was missed or failed (catch-up). Use Date: as the full span in the header, then organize the body DAY-FIRST: one plain full-date heading per distinct commit date (from each [YYYY-MM-DD] line), in chronological order, with the repositories and bullets for that day underneath. Report each day on its own. Do NOT merge, deduplicate, or roll up commits from different days into a single bullet—even when the same feature, file, or area was worked on across days, each day must keep its own bullets so the latest day's progress is never dropped. ";
 }
 
 /**
@@ -505,10 +557,10 @@ YOUR TASK:
 6. Use clear, business-friendly language
 7. When several commits are small, vague, or intangible (typos, tweaks, cleanup, minor fixes), merge them into themed bullets instead of one bullet per commit
 
-OUTPUT FORMAT:
+OUTPUT FORMAT (single day) — group by repository:
 Return ONLY the standup message content, formatted as:
 📅 Daily Update
-Date: [Date range if multiple days, or single date]
+Date: [single date]
 
 [Repository Name]:
 • Completed [summary of work done]
@@ -517,9 +569,23 @@ Date: [Date range if multiple days, or single date]
 [Another Repository]:
 • [Summary of work]
 
+OUTPUT FORMAT (multiple days — group DAY-FIRST):
+📅 Daily Update
+Date: [earliest date] → [latest date]
+
+[Full date heading, e.g. Monday, July 6, 2026]
+[Repository Name]:
+• [What I worked on that day]
+
+[Full date heading, e.g. Tuesday, July 7, 2026]
+[Repository Name]:
+• [What I worked on that day — even if it continues the same feature]
+
 DATE LINES VS BULLETS:
 The standup header Date: line shows the span of commit dates (or a single date). Do not prefix bullets with short weekdays (Mon, Tue, …).
-When commits span more than one calendar day, under each repository insert a plain (non-bullet) subsection heading for every distinct commit date before that day's bullets (full calendar date from each [YYYY-MM-DD] line). Weekend commits are already dated to the posting weekday in the input—group them with that day's work, not under Saturday/Sunday headings.
+When commits span more than one calendar day (catch-up after a missed or failed post), organize the body DAY-FIRST: for every distinct commit date add a plain (non-bullet) full-date heading (from each [YYYY-MM-DD] line) in chronological order, then list the repositories worked on that day and their bullets underneath.
+CRITICAL: Never merge, deduplicate, or roll up commits from different calendar days into one bullet. Even when the SAME feature, file, or area was worked on across days, each day keeps its own bullets describing that day's progress. Do not drop or hide the most recent day's work just because it continues earlier work.
+Weekend commits are already dated to the posting weekday in the input—group them with that day's work, not under Saturday/Sunday headings.
 
 DEPLOYMENT / VERSION BUMPS:
 Treat commits as a production or build deployment when they clearly bump app/package version, especially when package.json (or similar manifest) is mentioned. Examples: "update version to 26.5.18 in package.json", "bump version to 1.2.3", "chore: release 2.0.0".
@@ -540,8 +606,8 @@ LENGTH (STRICT):
 
 GUIDELINES:
 - Convert technical commit messages into plain English accomplishments
-- Merge multiple related commits into single bullet points
-- If commits span multiple days, keep chronological order and required per-date subsection headings (full calendar dates from the input)
+- Merge multiple related commits into single bullet points ONLY within the same calendar day; never merge across different days
+- If commits span multiple days, group day-first with a full-date heading per day, keep chronological order, and report each day's work separately (even repeated feature/area work)
 - Remove commit hashes, file names, and technical jargon (except version numbers for deployment bullets)
 - If commits are substantive bug fixes, you may still phrase as "Fixed issue with..." or "Resolved..."; merge tiny fixes into a Bug fixes umbrella line
 - If commits are substantive features, phrase as "Implemented..." or "Added..."; merge cosmetic-only work into a UI / UX updates umbrella line
@@ -955,7 +1021,11 @@ async function summarizeCommits(commits, dateLabels, manualNotes = []) {
 
   const catchUpHint = buildMultiDayPromptHint(commits);
 
-  const userPrompt = `Here are my git commits ${dateDescription}:\n\n${commitsText}\n\nPlease generate my daily standup update.${manualNoteHint}${catchUpHint}Commits that bump version in package.json (or similar) indicate a shipped build—call those out explicitly with version numbers. Each bullet point (each • line) must be at most ${MAX_STANDUP_BULLET_WORDS} words—count words only within that line after the bullet marker.`;
+  const headerSpan =
+    dateLabels.length > 1 ? `${dateLabels[0]} → ${dateLabels[dateLabels.length - 1]}` : dateLabels[0] ?? "";
+  const headerHint = headerSpan ? ` Use exactly this text for the Date: header line: "${headerSpan}".` : "";
+
+  const userPrompt = `Here are my git commits ${dateDescription}:\n\n${commitsText}\n\nPlease generate my daily standup update.${headerHint}${manualNoteHint}${catchUpHint}Commits that bump version in package.json (or similar) indicate a shipped build—call those out explicitly with version numbers. Each bullet point (each • line) must be at most ${MAX_STANDUP_BULLET_WORDS} words—count words only within that line after the bullet marker.`;
 
   console.log(`\n🤖 Sending to Gemini AI for summarization${isMultiDay ? " (multi-day)" : ""}...`);
 
@@ -968,11 +1038,19 @@ async function summarizeCommits(commits, dateLabels, manualNotes = []) {
           config: {
             systemInstruction: SYSTEM_PROMPT,
             temperature: 0.3, // Lower temperature for more consistent output
-            maxOutputTokens: 1500, // Increased for multi-day updates
+            // gemini-2.5-flash spends part of maxOutputTokens on internal "thinking";
+            // disable it so the full (possibly multi-day) update fits and isn't cut off.
+            thinkingConfig: { thinkingBudget: 0 },
+            maxOutputTokens: isMultiDay ? 4000 : 1500,
           },
         }),
       "Gemini API",
     );
+
+    const finishReason = response.candidates?.[0]?.finishReason;
+    if (finishReason && finishReason !== "STOP") {
+      throw new Error(`AI response was truncated (finishReason: ${finishReason})`);
+    }
 
     const summary = response.text?.trim();
 
@@ -983,6 +1061,7 @@ async function summarizeCommits(commits, dateLabels, manualNotes = []) {
     return summary;
   } catch (error) {
     console.error("❌ AI summarization failed:", error.message);
+    recordRunError("AI summarization failed", error);
     throw error;
   }
 }
@@ -1064,6 +1143,7 @@ async function postToZohoCliq(message) {
     return true;
   } catch (error) {
     console.error("❌ Failed to post to Zoho Cliq:", error.message);
+    recordRunError("Failed to post to Zoho Cliq", error);
     throw error;
   }
 }
@@ -1073,6 +1153,8 @@ async function postToZohoCliq(message) {
 // ============================================================================
 
 async function main() {
+  initErrorLog();
+
   console.log("=".repeat(60));
   console.log("📊 Daily Standup Bot");
   console.log("=".repeat(60));
@@ -1090,9 +1172,10 @@ async function main() {
 
   // Validate configuration
   if (REPO_PATHS.length === 0) {
-    console.error(
-      "❌ No repositories configured. Copy repos.example.txt to repos.txt and add your local git paths.",
-    );
+    const message =
+      "No repositories configured. Copy repos.example.txt to repos.txt and add your local git paths.";
+    console.error(`❌ ${message}`);
+    recordRunError(message);
     process.exit(1);
   }
 
@@ -1161,6 +1244,7 @@ async function main() {
     }
   } catch (error) {
     console.log("\n⚠️  AI summarization failed. Using fallback formatting...");
+    recordRunError("AI summarization failed (using fallback formatting)", error);
     summary =
       commits.length === 0
         ? formatNotesOnlyManually(manualNotes)
@@ -1203,6 +1287,8 @@ async function main() {
   } catch (error) {
     console.error("\n❌ Failed to complete standup update.");
     console.error("   .last-run and standup-notes were not changed.");
+    recordRunError("Failed to complete standup update", error);
+    console.error(`   See ${basename(ERROR_LOG_FILE)} for details.`);
     process.exit(1);
   }
 }
@@ -1287,7 +1373,7 @@ function formatCommitsManually(commits, dateLabels) {
   const isMultiDay = dateLabels.length > 1;
 
   const dateHeader = isMultiDay
-    ? `${dateLabels[0]} to ${dateLabels[dateLabels.length - 1]}`
+    ? `${dateLabels[0]} → ${dateLabels[dateLabels.length - 1]}`
     : today.toLocaleDateString("en-US", {
         weekday: "long",
         year: "numeric",
@@ -1295,34 +1381,39 @@ function formatCommitsManually(commits, dateLabels) {
         day: "numeric",
       });
 
-  // Group by repository and date
-  const byRepoAndDate = commits.reduce((acc, commit) => {
-    if (!acc[commit.repo]) {
-      acc[commit.repo] = {};
+  let message = `📅 Daily Update\nDate: ${dateHeader}\n\n`;
+
+  if (isMultiDay) {
+    // DAY-FIRST: keep each calendar day's work separate so cross-day progress is never merged away.
+    const byDateAndRepo = commits.reduce((acc, commit) => {
+      (acc[commit.date] ??= {});
+      (acc[commit.date][commit.repo] ??= []).push(commit.message);
+      return acc;
+    }, {});
+
+    for (const date of Object.keys(byDateAndRepo).sort()) {
+      message += `${formatCommitCalendarDay(date)}\n`;
+      for (const [repo, messages] of Object.entries(byDateAndRepo[date])) {
+        message += `${repo}:\n`;
+        for (const msg of messages) {
+          message += `  • ${manualBulletFromCommit(repo, msg)}\n`;
+        }
+      }
+      message += "\n";
     }
-    if (!acc[commit.repo][commit.date]) {
-      acc[commit.repo][commit.date] = [];
-    }
-    acc[commit.repo][commit.date].push(commit.message);
+    return message.trim();
+  }
+
+  // SINGLE DAY: group by repository.
+  const byRepo = commits.reduce((acc, commit) => {
+    (acc[commit.repo] ??= []).push(commit.message);
     return acc;
   }, {});
 
-  let message = `📅 Daily Update\nDate: ${dateHeader}\n\n`;
-
-  for (const [repo, dates] of Object.entries(byRepoAndDate)) {
+  for (const [repo, messages] of Object.entries(byRepo)) {
     message += `${repo}:\n`;
-
-    // Sort dates chronologically
-    const sortedDates = Object.keys(dates).sort();
-
-    for (const date of sortedDates) {
-      const messages = dates[date];
-      if (isMultiDay) {
-        message += `${formatCommitCalendarDay(date)}\n`;
-      }
-      for (const msg of messages) {
-        message += `  • ${manualBulletFromCommit(repo, msg)}\n`;
-      }
+    for (const msg of messages) {
+      message += `  • ${manualBulletFromCommit(repo, msg)}\n`;
     }
     message += "\n";
   }
@@ -1332,6 +1423,11 @@ function formatCommitsManually(commits, dateLabels) {
 
 // Run the main function
 main().catch((error) => {
+  if (!errorLogInitialized) {
+    initErrorLog();
+  }
+  recordRunError("Fatal error", error);
   console.error("\n💥 Fatal error:", error.message);
+  console.error(`   See ${basename(ERROR_LOG_FILE)} for details.`);
   process.exit(1);
 });
