@@ -35,7 +35,7 @@ cp repos.example.txt repos.txt
 Edit **`.env`**:
 
 - **`GEMINI_API_KEY`**, **`ZOHO_WEBHOOK_URL`** (required)
-- **`GIT_AUTHOR`** (optional; omit to include all authors in the commit window)
+- **`GIT_AUTHOR`** (optional; omit to include all authors in the commit window). Comma-separated for multiple identities (e.g. work email + GitHub `noreply` used on squash merges).
 
 Edit **`repos.txt`** with your local git repo paths (see below).
 
@@ -73,7 +73,7 @@ Optional: set **`REPO_PATHS_FILE`** in `.env` to use a different file path.
 |----------|----------|--------|
 | `GEMINI_API_KEY` | Yes | Unless already exported in the environment |
 | `ZOHO_WEBHOOK_URL` | Yes | Incoming webhook URL |
-| `GIT_AUTHOR` | No | Passed through as git `--author` filter; omit for all authors |
+| `GIT_AUTHOR` | No | Passed as git `--author` filter(s); comma-separated for multiple emails/names; omit for all authors |
 | `GITHUB_TOKEN` | No | GitHub PAT for PR links (`repo` scope); alias `GH_TOKEN` also works |
 | `PR_LINK_REPOS` | No | Comma-separated repo folder names for PR links (default: `mx-quick-manager-backend`) |
 | `REPO_PATHS_FILE` | No | Path to repo list file (default: `repos.txt`) |
@@ -222,7 +222,8 @@ Deleting **`.last-run`** in the project folder resets bookkeeping; the next week
 
 - Confirm **`repos.txt`** exists and each path exists and is a git repo.
 - Remember the window is **since last successful Zoho post**, not “calendar today only.”
-- If **`GIT_AUTHOR`** is set, it must match `git log` author filtering (`git config user.email`).
+- If **`GIT_AUTHOR`** is set, it must match `git log` author filtering (`git config user.email`). Use comma-separated values if GitHub squash merges use a different `noreply` email.
+- Commit collection scans **all local branches** (`git log --branches`), not only the branch currently checked out.
 - Add items to **`standup-notes.txt`** (lines starting with `-`) to post when there are no new commits.
 
 ### Weekend

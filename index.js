@@ -123,8 +123,11 @@ const ZOHO_WEBHOOK_URL = process.env.ZOHO_WEBHOOK_URL || "YOUR_ZOHO_WEBHOOK_URL_
 /** Absolute paths to local git repos — set in repos.txt (see repos.example.txt) */
 const REPO_PATHS = loadRepoPaths();
 
-/** Your git author name/email pattern to match commits */
-const GIT_AUTHOR_PATTERN = process.env.GIT_AUTHOR || ""; // e.g., "john.doe@company.com" or "John Doe"
+/** Your git author name/email pattern(s) to match commits (comma-separated for multiple) */
+const GIT_AUTHOR_PATTERNS = (process.env.GIT_AUTHOR || "")
+  .split(/[,;]+/)
+  .map((p) => p.trim())
+  .filter(Boolean);
 
 /** GitHub token for PR lookup (private repos). Repo basenames in PR_LINK_REPOS get PR URLs appended when eligible. */
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "";
@@ -587,9 +590,13 @@ When commits span more than one calendar day (catch-up after a missed or failed 
 CRITICAL: Never merge, deduplicate, or roll up commits from different calendar days into one bullet. Even when the SAME feature, file, or area was worked on across days, each day keeps its own bullets describing that day's progress. Do not drop or hide the most recent day's work just because it continues earlier work.
 Weekend commits are already dated to the posting weekday in the input—group them with that day's work, not under Saturday/Sunday headings.
 
-DEPLOYMENT / VERSION BUMPS:
-Treat commits as a production or build deployment when they clearly bump app/package version, especially when package.json (or similar manifest) is mentioned. Examples: "update version to 26.5.18 in package.json", "bump version to 1.2.3", "chore: release 2.0.0".
-For those commits, add an explicit bullet such as: "Shipped / deployed build [version] for [repository name]." or "Released version [version] from [repository]." Merge duplicate version-only housekeeping into one deployment line when appropriate.
+DEPLOYMENT / VERSION BUMPS (timart-unify — web vs desktop):
+For the timart-unify repository, distinguish deployment targets explicitly:
+- WEB deployment: commits that merge into the master branch (e.g. "Merge branch 'release-…' into master", "merged to master"). Web has no version number — phrase as: "Deployed to web (merged to master)." or "Completed a web deployment." Never invent or attach a version for web.
+- DESKTOP deployment: commits that bump the app/package version (e.g. "chore(desktop): update version in package.json to 26.7.23", "update version to 26.5.18"). Phrase as: "Deployed desktop build [version]." Include the version number when present.
+Do not call a version bump a generic "shipped build" for timart-unify — always say desktop. Do not treat "Merge branch 'master' into <feature>" (syncing master into a feature branch) as a web deployment.
+
+For other repositories, treat clear package.json version bumps as a shipped/deployed build with the version number. Merge duplicate version-only housekeeping into one deployment line when appropriate.
 
 GROUPING INTANGIBLE OR MINOR WORK:
 Use short umbrella bullets when messages are thin (e.g. "wip", "fixes", "small tweaks", "copy", "styles") or too numerous to list individually. Prefer labels like:
@@ -620,8 +627,96 @@ GUIDELINES:
 // ============================================================================
 
 /**
+ * Parse `git log` tab-separated lines into commit objects (deduped by SHA).
+ * @param {string} output
+ * @param {string} repoName
+ * @param {Set<string>} [seenShas]
+ * @returns {Array<{repo: string, message: string, date: string, sha: string}>}
+ */
+function parseGitLogLines(output, repoName, seenShas = new Set()) {
+  const commits = [];
+  if (!output) {
+    return commits;
+  }
+  for (const line of output.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    const parts = trimmed.split("\t");
+    if (parts.length < 3) {
+      continue;
+    }
+    const [sha, dateStr, message] = parts;
+    if (!sha || !message) {
+      continue;
+    }
+    const normalizedSha = sha.trim();
+    if (seenShas.has(normalizedSha)) {
+      continue;
+    }
+    seenShas.add(normalizedSha);
+    commits.push({
+      repo: repoName,
+      message: message.trim(),
+      date: dateStr.trim(),
+      sha: normalizedSha,
+    });
+  }
+  return commits;
+}
+
+/**
+ * True when the commit message signals a timart-unify WEB deployment (merge to master).
+ * Excludes syncing master into a feature branch ("Merge branch 'master' into feature").
+ * @param {string} message
+ */
+function looksLikeMergeToMaster(message) {
+  const text = message.trim();
+  // Explicit destination: … into master / merge to master
+  if (/\binto\s+['"]?master['"]?\s*$/i.test(text)) {
+    return true;
+  }
+  if (/\bmerg(?:e|ed|ing)\s+to\s+master\b/i.test(text)) {
+    return true;
+  }
+  // Default message when merging a release branch while checked out on master
+  if (/^Merge (?:remote-tracking )?branch ['"]release[^'"]+['"]\s*$/i.test(text)) {
+    return true;
+  }
+  // GitHub "Merge pull request" of a release branch onto master
+  if (/^Merge pull request #\d+ from \S*\/release[\w./-]*/i.test(text)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Run git log with shared author/date filters.
+ * @param {string} repoPath
+ * @param {string} sinceStr
+ * @param {string} untilStr
+ * @param {{ mergesOnly?: boolean }} [options]
+ */
+function runGitLog(repoPath, sinceStr, untilStr, options = {}) {
+  const mergeFlag = options.mergesOnly ? "--merges" : "--no-merges";
+  let command = `git -C "${repoPath}" log --branches ${mergeFlag} --since="${sinceStr}" --until="${untilStr}" --pretty=format:"%H%x09%cs%x09%s"`;
+  for (const pattern of GIT_AUTHOR_PATTERNS) {
+    command += ` --author=${JSON.stringify(pattern)}`;
+  }
+  return execSync(command, {
+    encoding: "utf-8",
+    stdio: ["pipe", "pipe", "pipe"],
+    timeout: 15000,
+  }).trim();
+}
+
+/**
  * Commits with committer date strictly after the last successful Zoho post through now.
  * Uses %cs so same-calendar-day commits made after posting appear on the next run.
+ * Scans ALL local branches (--branches), not just the currently checked-out branch —
+ * otherwise work on a feature branch is missed when you switch away before standup.
+ * For timart-unify, also includes merge-into-master commits (web deployments).
  * @param {string} repoPath
  * @param {Date} sinceDate exclusive lower bound in local time (matches git log --since)
  * @param {Date} untilDate upper bound (now)
@@ -633,42 +728,21 @@ function extractCommitsSince(repoPath, sinceDate, untilDate = new Date()) {
   try {
     const sinceStr = formatLocalGitTimestamp(sinceDate);
     const untilStr = formatLocalGitTimestamp(untilDate);
-    let command = `git -C "${repoPath}" log --since="${sinceStr}" --until="${untilStr}" --no-merges --pretty=format:"%H%x09%cs%x09%s"`;
+    const seenShas = new Set();
+    const commits = parseGitLogLines(
+      runGitLog(repoPath, sinceStr, untilStr, { mergesOnly: false }),
+      repoName,
+      seenShas,
+    );
 
-    if (GIT_AUTHOR_PATTERN) {
-      command += ` --author="${GIT_AUTHOR_PATTERN}"`;
-    }
-
-    const output = execSync(command, {
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: 10000,
-    }).trim();
-
-    if (!output) {
-      return [];
-    }
-
-    const commits = [];
-    for (const line of output.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) {
-        continue;
-      }
-      const parts = trimmed.split("\t");
-      if (parts.length < 3) {
-        continue;
-      }
-      const [sha, dateStr, message] = parts;
-      if (!sha || !message) {
-        continue;
-      }
-      commits.push({
-        repo: repoName,
-        message: message.trim(),
-        date: dateStr.trim(),
-        sha: sha.trim(),
-      });
+    // Web deploys on timart-unify are merge commits into master; --no-merges skips them.
+    if (repoName === "timart-unify") {
+      const mergeCommits = parseGitLogLines(
+        runGitLog(repoPath, sinceStr, untilStr, { mergesOnly: true }),
+        repoName,
+        seenShas,
+      ).filter((c) => looksLikeMergeToMaster(c.message));
+      commits.push(...mergeCommits);
     }
 
     return commits;
@@ -1025,7 +1099,7 @@ async function summarizeCommits(commits, dateLabels, manualNotes = []) {
     dateLabels.length > 1 ? `${dateLabels[0]} → ${dateLabels[dateLabels.length - 1]}` : dateLabels[0] ?? "";
   const headerHint = headerSpan ? ` Use exactly this text for the Date: header line: "${headerSpan}".` : "";
 
-  const userPrompt = `Here are my git commits ${dateDescription}:\n\n${commitsText}\n\nPlease generate my daily standup update.${headerHint}${manualNoteHint}${catchUpHint}Commits that bump version in package.json (or similar) indicate a shipped build—call those out explicitly with version numbers. Each bullet point (each • line) must be at most ${MAX_STANDUP_BULLET_WORDS} words—count words only within that line after the bullet marker.`;
+  const userPrompt = `Here are my git commits ${dateDescription}:\n\n${commitsText}\n\nPlease generate my daily standup update.${headerHint}${manualNoteHint}${catchUpHint}For timart-unify: version bumps are DESKTOP deployments (include the version); merges into master are WEB deployments with no version—phrase like "Deployed to web (merged to master)." Each bullet point (each • line) must be at most ${MAX_STANDUP_BULLET_WORDS} words—count words only within that line after the bullet marker.`;
 
   console.log(`\n🤖 Sending to Gemini AI for summarization${isMultiDay ? " (multi-day)" : ""}...`);
 
@@ -1346,6 +1420,7 @@ function looksLikePackageVersionBump(message) {
   const mentionsVersioning =
     /(^|[\s,.])(bump|update)\s+version\b/i.test(message) ||
     /\bversion\s+bump\b/i.test(lower) ||
+    /\bchore\(desktop\).*version\b/i.test(lower) ||
     /\b(chore:\s*)?(release|publish)\b/i.test(lower);
   const ver = extractSemverFromCommitMessage(message);
   return Boolean(ver) && (mentionsManifest || mentionsVersioning || /\b(deploy|release|publish)\b/i.test(lower));
@@ -1355,8 +1430,15 @@ function looksLikePackageVersionBump(message) {
  * One fallback bullet per commit: deployment wording when detected, else truncated raw subject.
  */
 function manualBulletFromCommit(repoName, rawMessage) {
+  if (repoName === "timart-unify" && looksLikeMergeToMaster(rawMessage)) {
+    return truncateWords("Deployed to web (merged to master).");
+  }
+
   const ver = extractSemverFromCommitMessage(rawMessage);
   if (ver && looksLikePackageVersionBump(rawMessage)) {
+    if (repoName === "timart-unify") {
+      return truncateWords(`Deployed desktop build ${ver}.`);
+    }
     return truncateWords(`Deployed build ${ver}.`);
   }
   return truncateWords(rawMessage);
