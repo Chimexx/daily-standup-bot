@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /**
- * Weekly Standup Worker (Tuesdays)
- * Summarizes git commits from the past 7 days and posts to Zoho Cliq (bot or channel).
+ * Weekly Standup Worker
+ * Summarizes git commits from the previous Tuesday through the report Tuesday
+ * and posts to Zoho Cliq (Amadioha bot by default).
  *
- * Setup: shared .env + repos.txt at project root (see docs/WEEKLY-STANDUP.md)
- * Run: npm run weekly-standup
- * Test: DRY_RUN=1 WEEKLY_STANDUP_FORCE=1 npm run weekly-standup
+ * Setup: shared .env + repos.txt (see docs/WEEKLY-STANDUP.md)
+ * Run:   npm run weekly-standup
+ * Test:  DRY_RUN=1 WEEKLY_STANDUP_FORCE=1 npm run weekly-standup
  */
 
 import { GoogleGenAI } from "@google/genai";
@@ -15,12 +16,19 @@ import { existsSync, readFileSync } from "fs";
 import { loadEnvFile } from "../../lib/env.js";
 import { createRunErrorLogger } from "../../lib/error-log.js";
 import { postToZohoCliq } from "../../lib/zoho-cliq-post.js";
+import { PROJECT_ROOT, resolveEnvPath } from "../../lib/paths.js";
 import {
-  PROJECT_ROOT,
-  resolveEnvPath,
-} from "../../lib/paths.js";
+  formatDateDisplay,
+  formatLocalGitTimestamp,
+  formatWeekRange,
+  getWeeklyWindow,
+} from "../../lib/weekly-window.js";
 
 loadEnvFile(join(PROJECT_ROOT, ".env"));
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
 
 const ERROR_LOG_FILE = join(PROJECT_ROOT, "weekly-standup-errors.txt");
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
@@ -67,60 +75,43 @@ CLASSIFICATION — pick the right verb (do not default everything to "worked on"
 - "I deployed..." — when deployment signals apply (see below); can combine with another verb, e.g. "I implemented X and deployed to web"
 
 DEPLOYMENT SIGNALS — mention deployment in the bullet when any apply for that repo:
-- Version-bump / release chore commits (e.g. "chore(desktop): update version to 26.6.9 in package.json", "chore: bump version") mean a release was cut — note that a deployment or release was made
+- Version-bump / release chore commits mean a release was cut — note that a deployment or release was made
 - A repo appears in the "Web deployments" list — a merge to master happened; note that the repo was deployed to web/production
 
 OUTPUT FORMAT (plain text only):
 📅 Weekly Update (Tuesday)
-Week: [start date] – [end date]
-
-• I implemented ...
-• I refactored ...
+Week: [previous Tuesday] – [report Tuesday]
 
 Use exactly • for bullets. No more than ${MAX_BULLETS} bullets.
 Output ONLY the formatted update — no preamble, explanation, or markdown.`;
 
-function parseRepoPaths(raw) {
-  if (!raw || typeof raw !== "string") {
-    return [];
-  }
-  return [
-    ...new Set(
-      raw
-        .split(/[:;\r\n]+/)
-        .map((p) => p.trim())
-        .filter(Boolean),
-    ),
-  ];
-}
-
-function loadRepoPathsFromFile(filePath) {
-  if (!existsSync(filePath)) {
-    return [];
-  }
-  return [
-    ...new Set(
-      readFileSync(filePath, "utf-8")
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line && !line.startsWith("#")),
-    ),
-  ];
-}
+// ---------------------------------------------------------------------------
+// Repos
+// ---------------------------------------------------------------------------
 
 function loadRepoPaths() {
   const filePath = resolveEnvPath(process.env.REPO_PATHS_FILE, "repos.txt");
-  const fromFile = loadRepoPathsFromFile(filePath);
-  if (fromFile.length > 0) {
-    return fromFile;
+  if (existsSync(filePath)) {
+    const fromFile = [
+      ...new Set(
+        readFileSync(filePath, "utf-8")
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line && !line.startsWith("#")),
+      ),
+    ];
+    if (fromFile.length > 0) {
+      return fromFile;
+    }
   }
 
-  const fromEnv = parseRepoPaths(process.env.REPO_PATHS);
+  const fromEnv = (process.env.REPO_PATHS || "")
+    .split(/[:;\r\n]+/)
+    .map((p) => p.trim())
+    .filter(Boolean);
   if (fromEnv.length > 0) {
-    console.warn(
-      "⚠️  Using REPO_PATHS from .env — prefer repos.txt (see config/examples/repos.example.txt).",
-    );
-    return fromEnv;
+    console.warn("⚠️  Using REPO_PATHS from .env — prefer repos.txt.");
+    return [...new Set(fromEnv)];
   }
 
   return [];
@@ -128,28 +119,9 @@ function loadRepoPaths() {
 
 const REPO_PATHS = loadRepoPaths();
 
-function formatLocalGitTimestamp(d) {
-  const pad = (n) => n.toString().padStart(2, "0");
-  const x = new Date(d);
-  return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())} ${pad(x.getHours())}:${pad(x.getMinutes())}:${pad(x.getSeconds())}`;
-}
-
-function formatDateDisplay(date) {
-  return date.toLocaleDateString("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-}
-
-/** Last Tuesday 00:00 local → now. On a Tuesday run, that is 7 calendar days. */
-function getWeeklyWindow(now = new Date()) {
-  const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
-  const since = new Date(todayMidnight);
-  since.setDate(since.getDate() - 7);
-  return { since, until: now };
-}
+// ---------------------------------------------------------------------------
+// Git
+// ---------------------------------------------------------------------------
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -173,26 +145,6 @@ async function withRetries(operation, label) {
   throw lastError;
 }
 
-function gitBranchExists(repoPath, branch) {
-  try {
-    execSync(`git -C "${repoPath}" rev-parse --verify "${branch}"`, {
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: 5000,
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function isVersionBumpCommit(message) {
-  return VERSION_BUMP_PATTERN.test(message.trim());
-}
-
-function isFeatCommit(message) {
-  return FEAT_COMMIT_PATTERN.test(message.trim());
-}
-
 function runGitLog(repoPath, sinceStr, untilStr, { mergesOnly = false } = {}) {
   const mergeFlag = mergesOnly ? "--merges" : "--no-merges";
   let command = `git -C "${repoPath}" log --branches ${mergeFlag} --since="${sinceStr}" --until="${untilStr}" --pretty=format:"%s"`;
@@ -206,27 +158,34 @@ function runGitLog(repoPath, sinceStr, untilStr, { mergesOnly = false } = {}) {
   }).trim();
 }
 
-function extractCommitsSince(repoPath, sinceDate, untilDate) {
+function isVersionBumpCommit(message) {
+  return VERSION_BUMP_PATTERN.test(message.trim());
+}
+
+function isFeatCommit(message) {
+  return FEAT_COMMIT_PATTERN.test(message.trim());
+}
+
+function extractCommits(repoPath, since, until) {
   const repoName = basename(repoPath);
   try {
-    const sinceStr = formatLocalGitTimestamp(sinceDate);
-    const untilStr = formatLocalGitTimestamp(untilDate);
-    const output = runGitLog(repoPath, sinceStr, untilStr);
+    const output = runGitLog(
+      repoPath,
+      formatLocalGitTimestamp(since),
+      formatLocalGitTimestamp(until),
+    );
     if (!output) {
       return [];
     }
-    return output
-      .split("\n")
-      .filter((line) => line.trim())
-      .map((message) => {
-        const trimmed = message.trim();
-        return {
-          repo: repoName,
-          message: trimmed,
-          versionBump: isVersionBumpCommit(trimmed),
-          isFeat: isFeatCommit(trimmed),
-        };
-      });
+    return output.split("\n").filter(Boolean).map((message) => {
+      const trimmed = message.trim();
+      return {
+        repo: repoName,
+        message: trimmed,
+        versionBump: isVersionBumpCommit(trimmed),
+        isFeat: isFeatCommit(trimmed),
+      };
+    });
   } catch (error) {
     if (error.status === 128 || error.message.includes("not a git repository")) {
       console.warn(`⚠️  ${repoName}: Not a valid git repository`);
@@ -237,15 +196,19 @@ function extractCommitsSince(repoPath, sinceDate, untilDate) {
   }
 }
 
-function extractMasterMergesSince(repoPath, sinceDate, untilDate) {
+function extractMasterMerges(repoPath, since, until) {
   const repoName = basename(repoPath);
-  if (!gitBranchExists(repoPath, "master")) {
+  try {
+    execSync(`git -C "${repoPath}" rev-parse --verify master`, {
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+    });
+  } catch {
     return [];
   }
+
   try {
-    const sinceStr = formatLocalGitTimestamp(sinceDate);
-    const untilStr = formatLocalGitTimestamp(untilDate);
-    const command = `git -C "${repoPath}" log master --since="${sinceStr}" --until="${untilStr}" --merges --pretty=format:"%s"`;
+    const command = `git -C "${repoPath}" log master --since="${formatLocalGitTimestamp(since)}" --until="${formatLocalGitTimestamp(until)}" --merges --pretty=format:"%s"`;
     const output = execSync(command, {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
@@ -254,37 +217,42 @@ function extractMasterMergesSince(repoPath, sinceDate, untilDate) {
     if (!output) {
       return [];
     }
-    return output
-      .split("\n")
-      .filter((line) => line.trim())
-      .map((message) => ({ repo: repoName, message: message.trim() }));
+    return output.split("\n").filter(Boolean).map((message) => ({
+      repo: repoName,
+      message: message.trim(),
+    }));
   } catch (error) {
     console.warn(`⚠️  ${repoName}: could not read master merges (${error.message})`);
     return [];
   }
 }
 
-function aggregateCommits(sinceDate, untilDate) {
-  const all = [];
+function aggregateCommits(since, until) {
+  const commits = [];
   const masterDeploys = [];
+
   for (const repoPath of REPO_PATHS) {
-    const commits = extractCommitsSince(repoPath, sinceDate, untilDate);
-    all.push(...commits);
-    if (commits.length > 0) {
-      console.log(`✅ ${basename(repoPath)}: ${commits.length} commit(s)`);
+    const repoCommits = extractCommits(repoPath, since, until);
+    commits.push(...repoCommits);
+    if (repoCommits.length > 0) {
+      console.log(`✅ ${basename(repoPath)}: ${repoCommits.length} commit(s)`);
     }
-    const merges = extractMasterMergesSince(repoPath, sinceDate, untilDate);
+
+    const merges = extractMasterMerges(repoPath, since, until);
     if (merges.length > 0) {
       masterDeploys.push({ repo: basename(repoPath), merges });
       console.log(`🚀 ${basename(repoPath)}: ${merges.length} merge(s) to master`);
     }
   }
-  return { commits: all, masterDeploys };
+
+  return { commits, masterDeploys };
 }
 
-function buildSummarizePrompt(commits, masterDeploys, since, until) {
-  const deploys = Array.isArray(masterDeploys) ? masterDeploys : [];
-  const weekLabel = `${formatDateDisplay(since)} – ${formatDateDisplay(until)}`;
+// ---------------------------------------------------------------------------
+// Summarization
+// ---------------------------------------------------------------------------
+
+function buildSummarizePrompt(commits, masterDeploys, weekLabel) {
   const commitLines = commits.map((c) => {
     const tags = [];
     if (c.isFeat) {
@@ -299,27 +267,19 @@ function buildSummarizePrompt(commits, masterDeploys, since, until) {
     return `[${c.repo}] ${c.message}${suffix}`;
   });
 
-  const sections = [
-    `Weekly window: ${weekLabel}`,
-    "",
-    "Commits:",
-    commitLines.join("\n"),
-  ];
+  const sections = [`Weekly window: ${weekLabel}`, "", "Commits:", commitLines.join("\n")];
 
-  if (deploys.length > 0) {
+  if (masterDeploys.length > 0) {
     sections.push(
       "",
-      "Web deployments (merge to master this week — treat each repo as deployed to web):",
-      deploys
+      "Web deployments (merge to master this week):",
+      masterDeploys
         .map(({ repo, merges }) => `- ${repo} (${merges.length} merge${merges.length === 1 ? "" : "s"})`)
         .join("\n"),
     );
   }
 
-  sections.push(
-    "",
-    `Write at most ${MAX_BULLETS} bullets. Week line in header must use: ${weekLabel}`,
-  );
+  sections.push("", `Write at most ${MAX_BULLETS} bullets. Week line in header must use: ${weekLabel}`);
   return sections.join("\n");
 }
 
@@ -371,10 +331,9 @@ function classifyCommitVerb(message) {
   return "refactored";
 }
 
-function formatCommitsManually(commits, masterDeploys, since, until) {
-  const deploys = Array.isArray(masterDeploys) ? masterDeploys : [];
-  const deployedRepos = new Set(deploys.map((d) => d.repo));
-  const header = `📅 Weekly Update (Tuesday)\nWeek: ${formatDateDisplay(since)} – ${formatDateDisplay(until)}\n`;
+function formatCommitsManually(commits, masterDeploys, weekLabel) {
+  const deployedRepos = new Set(masterDeploys.map((d) => d.repo));
+  const header = `📅 Weekly Update (Tuesday)\nWeek: ${weekLabel}\n`;
   const bullets = commits.slice(0, MAX_BULLETS).map((c) => {
     const msg = truncateWords(c.message);
     let verb = c.versionBump ? "deployed" : classifyCommitVerb(c.message);
@@ -387,18 +346,17 @@ function formatCommitsManually(commits, masterDeploys, since, until) {
   return `${header}\n${bullets.join("\n")}`.trim();
 }
 
-async function summarizeWeekly(commits, masterDeploys, since, until) {
+async function summarizeWeekly(commits, masterDeploys, weekLabel) {
   if (!GEMINI_API_KEY) {
     throw new Error("GEMINI_API_KEY not configured");
   }
-  const genAI = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-  const userPrompt = buildSummarizePrompt(commits, masterDeploys, since, until);
 
+  const genAI = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
   const response = await withRetries(
     () =>
       genAI.models.generateContent({
         model: GEMINI_MODEL,
-        contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+        contents: [{ role: "user", parts: [{ text: buildSummarizePrompt(commits, masterDeploys, weekLabel) }] }],
         config: {
           systemInstruction: SYSTEM_PROMPT,
           temperature: 0.3,
@@ -409,8 +367,7 @@ async function summarizeWeekly(commits, masterDeploys, since, until) {
     "Gemini API",
   );
 
-  const finishReason = response.candidates?.[0]?.finishReason;
-  if (finishReason === "MAX_TOKENS") {
+  if (response.candidates?.[0]?.finishReason === "MAX_TOKENS") {
     throw new Error("AI response truncated (MAX_TOKENS)");
   }
 
@@ -426,6 +383,10 @@ async function summarizeWeekly(commits, masterDeploys, since, until) {
   return normalized;
 }
 
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
 async function main() {
   runErrorLog.init();
 
@@ -436,53 +397,50 @@ async function main() {
 
   const now = new Date();
   if (!FORCE_RUN && now.getDay() !== 2) {
-    console.log("📅 This worker runs on Tuesdays only. Exiting.");
-    console.log("   (Set WEEKLY_STANDUP_FORCE=1 to run anyway.)");
+    console.log("📅 Scheduled for Tuesdays. Exiting (Shortcuts sets WEEKLY_STANDUP_FORCE=1).");
     process.exit(0);
   }
 
   if (REPO_PATHS.length === 0) {
-    const message =
-      "No repositories configured. Copy config/examples/repos.example.txt to repos.txt.";
+    const message = "No repositories configured. Copy config/examples/repos.example.txt to repos.txt.";
     runErrorLog.record(message);
     console.error(`❌ ${message}`);
     process.exit(1);
   }
 
   if (!ZOHO_WEBHOOK_URL) {
-    const message =
-      "ZOHO_WEBHOOK_URL (or ZOHO_WEEKLY_WEBHOOK_URL) is not configured in .env";
+    const message = "ZOHO_WEEKLY_WEBHOOK_URL is not configured in .env";
     runErrorLog.record(message);
     console.error(`❌ ${message}`);
     process.exit(1);
   }
 
-  const { since, until } = getWeeklyWindow(now);
-  console.log(`📆 Commit window: ${formatDateDisplay(since)} → ${formatDateDisplay(until)}\n`);
+  const window = getWeeklyWindow(now);
+  const weekLabel = formatWeekRange(window);
+
+  console.log(`📆 Report Tuesday: ${formatDateDisplay(window.reportTuesday)}`);
+  console.log(`📆 Commit window:  ${weekLabel}`);
+  console.log(`   (since ${formatLocalGitTimestamp(window.since)} → until ${formatLocalGitTimestamp(window.until)})\n`);
   console.log("🔍 Scanning repositories…\n");
 
-  const { commits, masterDeploys } = aggregateCommits(since, until);
+  const { commits, masterDeploys } = aggregateCommits(window.since, window.until);
 
   if (commits.length === 0) {
-    console.log("\n📝 No commits in the past week. Nothing posted.");
+    console.log("\n📝 No commits in this Tuesday-to-Tuesday window. Nothing posted.");
     process.exit(0);
   }
 
   console.log(`\n📊 Total commits: ${commits.length}`);
   if (masterDeploys.length > 0) {
-    console.log(
-      `🚀 Web deployments: ${masterDeploys.map((d) => d.repo).join(", ")}`,
-    );
+    console.log(`🚀 Web deployments: ${masterDeploys.map((d) => d.repo).join(", ")}`);
   }
 
   let summary;
   try {
-    summary = await summarizeWeekly(commits, masterDeploys, since, until);
+    summary = await summarizeWeekly(commits, masterDeploys, weekLabel);
   } catch (error) {
     console.log(`\n⚠️  AI failed (${error.message}); using fallback formatting.`);
-    summary = enforceMaxBulletsAndWords(
-      formatCommitsManually(commits, masterDeploys, since, until),
-    );
+    summary = enforceMaxBulletsAndWords(formatCommitsManually(commits, masterDeploys, weekLabel));
   }
 
   console.log("\n" + "=".repeat(60));
