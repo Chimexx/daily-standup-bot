@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "recipient": "manager@company.com",
+  "message": "Hi — monthly check-in from me.",
+  "dayOfMonth": 1
+}

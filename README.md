@@ -15,6 +15,38 @@ Local Node.js automation that collects **new git commits** across several reposi
 
 See `index.js` for constants such as `MAX_STANDUP_BULLET_WORDS`, `MAX_CATCHUP_CALENDAR_DAYS`, and retry settings.
 
+## Weekly standup (Tuesdays)
+
+Every **Tuesday at 11:45 AM**, a separate worker summarizes your git commits from the **past 7 days** into up to **4 short bullets** and posts to Zoho Cliq (bot or channel).
+
+See **[docs/WEEKLY-STANDUP.md](./docs/WEEKLY-STANDUP.md)** for setup and macOS Shortcuts scheduling.
+
+## Monthly Cliq worker (optional)
+
+A separate worker sends a **monthly DM** to a Cliq user via a bot on a day you configure. It can be disabled with `"enabled": false` in the config file.
+
+See **[docs/MONTHLY-CLIQ.md](./docs/MONTHLY-CLIQ.md)** for setup, scheduling, and testing. For the daily report from the editor, see **[docs/DAILY-REPORT.md](./docs/DAILY-REPORT.md)**.
+
+## Repository layout
+
+```
+daily-standup-bot/
+├── workers/              # One folder per automation
+│   ├── daily-standup/    # Git → Gemini → Cliq standup
+│   ├── weekly-standup/   # Tuesday weekly summary → Cliq
+│   └── monthly-cliq/     # Monthly Cliq DM worker
+├── lib/                  # Shared env, paths, error logging
+├── config/examples/      # Committed templates (copy to project root)
+├── scripts/              # Shell wrappers for Shortcuts / manual runs
+├── automation/           # launchd & cron setup scripts
+├── docs/                 # Extended documentation
+├── .env                  # Secrets (gitignored, project root)
+├── repos.txt             # Local repo paths (gitignored)
+└── index.js              # Shim → workers/daily-standup (backward compatible)
+```
+
+Runtime files (`.env`, `repos.txt`, `.last-run`, `standup-notes.txt`, etc.) stay at the **project root** so existing installs keep working.
+
 ## Prerequisites
 
 - **Node.js 18+** (20 LTS is fine)
@@ -29,7 +61,7 @@ See `index.js` for constants such as `MAX_STANDUP_BULLET_WORDS`, `MAX_CATCHUP_CA
 cd /path/to/daily-standup-bot
 npm install
 cp .env.example .env
-cp repos.example.txt repos.txt
+cp config/examples/repos.example.txt repos.txt
 ```
 
 Edit **`.env`**:
@@ -54,7 +86,7 @@ The script loads **`.env`** from the **same directory as `index.js`** (it does n
 Local git repo paths are stored in **`repos.txt`** (not committed — see `.gitignore`). Copy the example and edit:
 
 ```bash
-cp repos.example.txt repos.txt
+cp config/examples/repos.example.txt repos.txt
 ```
 
 ```text
@@ -82,7 +114,7 @@ Copy from `.env.example` and fill in real values. **Do not commit `.env` or `rep
 
 ## Manual notes (non-git work)
 
-Create **`standup-notes.txt`** next to `index.js` (see **`standup-notes.example.txt`**):
+Create **`standup-notes.txt`** at the project root (see **`config/examples/standup-notes.example.txt`**):
 
 ```text
 - Had a planning meeting with product
@@ -99,14 +131,14 @@ Create **`standup-notes.txt`** next to `index.js` (see **`standup-notes.example.
 
 Running twice successfully on the same day with **new commits after the first post** can produce **two Cliq messages**; that is expected with the current `.last-run` design.
 
-### macOS — LaunchAgent (recommended): `launchd-setup.sh`
+### macOS — LaunchAgent (recommended): `automation/launchd-daily-setup.sh`
 
-Uses **`launchd`** with **no secrets in the plist**; credentials come from **`.env`** next to `index.js`.
+Uses **`launchd`** with **no secrets in the plist**; credentials come from **`.env`** at the project root.
 
 ```bash
 cd /path/to/daily-standup-bot
-chmod +x launchd-setup.sh
-./launchd-setup.sh
+chmod +x automation/launchd-daily-setup.sh
+./automation/launchd-daily-setup.sh
 ```
 
 Default schedule: **every day at 17:30** (5:30 PM) local time. Logs:
@@ -124,7 +156,7 @@ launchctl unload ~/Library/LaunchAgents/com.user.daily-standup-bot.plist
 
 **Sleep:** If the Mac is asleep at the scheduled time, that run may be skipped. The next successful run still collects commits **after the last successful post**, so work is not lost—as long as the job runs again while awake.
 
-If you change install location, re-run `./launchd-setup.sh` (unload the old plist first if needed).
+If you change install location, re-run `./automation/launchd-daily-setup.sh` (unload the old plist first if needed).
 
 ### macOS — Shortcuts
 
@@ -158,7 +190,7 @@ cd "/Users/macbook/daily-standup-bot" && /opt/homebrew/opt/node@20/bin/node inde
 | Weekend | `It's the weekend!` |
 | Zoho/Gemini error | `Failed to post` / `AI summarization failed` |
 
-Edit **`standup-notes.txt`** (not `standup-notes.example.txt`). Add **Show Notification** after the shell step if you want a visible “finished” signal in Shortcuts.
+Edit **`standup-notes.txt`** (not `config/examples/standup-notes.example.txt`). Add **Show Notification** after the shell step if you want a visible “finished” signal in Shortcuts.
 
 #### How to verify Shortcuts actually ran the script
 
@@ -205,12 +237,9 @@ Adjust the Node binary path (`which node`) and time as needed.
 
 Optional helper **`cron-setup.sh`** exists but **embeds API keys in your crontab**; prefer `.env` + the line above unless you know why you need the script.
 
-### VS Code task
+### VS Code / Cursor — daily report
 
-See **`vscode-global-task.json`**. Copy the tasks into your user `tasks.json` and:
-
-- Replace **`${userHome}/personal-automation/daily-standup-bot`** with your real project path (or use a variable you prefer).
-- Prefer relying on **`.env`** in that folder instead of storing secrets in task JSON.
+See **[docs/DAILY-REPORT.md](./docs/DAILY-REPORT.md)** and **`vscode-global-task.json`** at the project root. Copy the task into your user `tasks.json`, set your install path, and run **Generate Daily Report** from any workspace.
 
 ## Troubleshooting
 
@@ -247,7 +276,7 @@ If `Cannot find package '@google/genai'`, dependencies are missing.
 ## Security
 
 - Keep **`.env`** local and **gitignored**.
-- **launchd plist** from `launchd-setup.sh` only sets **`PATH`**; secrets stay in **`.env`**.
+- **launchd plist** from `automation/launchd-daily-setup.sh` only sets **`PATH`**; secrets stay in **`.env`**.
 - Avoid committing webhook URLs or API keys into **tasks**, **shell history**, or **crontab** when `.env` is enough.
 
 ## License

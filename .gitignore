@@ -45,3 +45,11 @@ standup-notes.txt
 
 # Latest run errors only (overwritten each run; empty when the last run succeeded)
 standup-errors.txt
+
+# Monthly Cliq worker (see MONTHLY-CLIQ.md)
+monthly-cliq.config.json
+.last-monthly-cliq
+monthly-cliq-errors.txt
+
+# Weekly standup worker (Tuesdays; see docs/WEEKLY-STANDUP.md)
+weekly-standup-errors.txt

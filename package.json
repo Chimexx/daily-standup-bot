@@ -3,10 +3,12 @@
   "version": "1.0.0",
   "description": "Local automation script to generate daily standup updates from git commits and post to Zoho Cliq",
   "type": "module",
-  "main": "index.js",
+  "main": "workers/daily-standup/index.js",
   "scripts": {
-    "start": "node index.js",
-    "standup": "node index.js"
+    "start": "node workers/daily-standup/index.js",
+    "standup": "node workers/daily-standup/index.js",
+    "monthly-cliq": "node workers/monthly-cliq/index.js",
+    "weekly-standup": "node workers/weekly-standup/index.js"
   },
   "keywords": [
     "automation",

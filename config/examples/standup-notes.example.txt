@@ -1,6 +1,6 @@
 # TEMPLATE ONLY — the bot does NOT read this file.
-# Create standup-notes.txt (copy this file) and edit THAT file:
-#   cp standup-notes.example.txt standup-notes.txt
+# Create standup-notes.txt at the project root (copy this file):
+#   cp config/examples/standup-notes.example.txt standup-notes.txt
 #
 # One line per item, starting with "-". Cleared after a successful Zoho post.
 
